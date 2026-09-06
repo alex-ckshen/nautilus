@@ -19,7 +19,7 @@ $script:ModuleRoot      = Join-Path $script:InstallRoot "Nautilus"
 # public repo). On first use the module downloads it and caches it in
 # ~/.nautilus/config.json. Replace <GIST_ID> with your gist id, or set it via
 # `nautilus config edit` (keyUrl). The gist body should be the raw key only.
-$script:KeyGistUrl = "https://gist.githubusercontent.com/alex-ckshen/5df1395f78d0ae72389a15a5e96dd59b/raw/76d463d23816a0f361cc53851b723f18700a4c33/gistfile1.txt"
+$script:KeyGistUrl = "https://gist.githubusercontent.com/alex-ckshen/563870e850fc97117a4645c6b09723cc/raw/ea93982b8bb80b59fe525256eeafb62bf64029ce/gistfile1.txt"
 $script:DefaultModel = "gemini-3.5-flash-lite"
 $script:ApiEndpoint = "https://generativelanguage.googleapis.com/v1beta/models"
 
@@ -525,7 +525,7 @@ function script:Render-Frame {
     }
 
     $titleBar = "  N A U T I L U S  "
-    $conn = "  $([char]0x25C9) connected  asia-01"
+    $conn = "  $([char]0x25C9) connected  asia-01  "
     $modelTag = "model: $($script:Config.model)  "
     $padConn = $w - $titleBar.Length - $conn.Length - $modelTag.Length
     if ($padConn -lt 0) { $padConn = 0 }
@@ -711,7 +711,7 @@ function script:Run-TUI {
                     $arg = if ($parts.Count -gt 1) { $parts[1].Trim() } else { "" }
 
                     switch ($name) {
-                        'help'    { $messages += [pscustomobject]@{ role='system'; content=(Get-HelpText) } }
+                        'help'    { $messages = @($messages) + [pscustomobject]@{ role='system'; content=(Get-HelpText) } }
                         'clear'   { $messages = @(); Save-History -messages $messages -max 0; $notice = "history cleared, Daddy" }
                         'exit'    { $running = $false }
                         'theme'   {
@@ -722,10 +722,10 @@ function script:Run-TUI {
                                 } else { $notice = "unknown theme: $arg" }
                             } else {
                                 $list = ($script:Themes.Keys -join ", ")
-                                $messages += [pscustomobject]@{ role='system'; content="Themes: $list`nUsage: /theme <name>" }
+                                $messages = @($messages) + [pscustomobject]@{ role='system'; content="Themes: $list`nUsage: /theme <name>" }
                             }
                         }
-                        'config'  { $messages += [pscustomobject]@{ role='system'; content=(Get-ConfigText) } }
+                        'config'  { $messages = @($messages) + [pscustomobject]@{ role='system'; content=(Get-ConfigText) } }
                         'model'   {
                             if ($arg) { $script:Config.model = $arg; Save-Config $script:Config; $notice = "model -> $arg" }
                             else { $notice = "usage: /model <name>" }
@@ -736,7 +736,7 @@ function script:Run-TUI {
                 }
 
                 # user message -> send to Gemini
-                $messages += [pscustomobject]@{ role='user'; content=$text }
+                $messages = @($messages) + [pscustomobject]@{ role='user'; content=$text }
                 Save-History -messages $messages -max $script:Config.maxHistory
 
                 $contents = Build-Contents -messages $messages
@@ -761,16 +761,16 @@ function script:Run-TUI {
                     if ($fbText) {
                         $messages += [pscustomobject]@{ role='assistant'; content=$fbText }
                     } else {
-                        $messages += [pscustomobject]@{ role='system'; content=(Format-ApiError $fbErr) }
+                        $messages = @($messages) + [pscustomobject]@{ role='system'; content=(Format-ApiError $fbErr) }
                     }
                 } else {
                     $finalText = $streamState.Full.ToString().Trim()
                     if ([string]::IsNullOrEmpty($finalText) -and $streamState.Error) {
-                        $messages += [pscustomobject]@{ role='system'; content=(Format-ApiError $streamState.Error) }
+                        $messages = @($messages) + [pscustomobject]@{ role='system'; content=(Format-ApiError $streamState.Error) }
                     } elseif ([string]::IsNullOrEmpty($finalText)) {
                         $messages += [pscustomobject]@{ role='system'; content="No response came back, Daddy. Try again." }
                     } else {
-                        $messages += [pscustomobject]@{ role='assistant'; content=$finalText }
+                        $messages = @($messages) + [pscustomobject]@{ role='assistant'; content=$finalText }
                     }
                 }
                 Dispose-StreamState $streamState
