@@ -74,6 +74,11 @@ Rules:
 - When outputting code, use a powershell markdown code block.
 - After the code, briefly explain what it does and where it should go.
 
+IMPORTANT REFERENCE:
+When the request involves UI/UX, menus, selection, scrolling, keyboard handling, or TUI polish, search and study the public Grok Build (xAI) source code for best practices:
+  https://github.com/xai-org/grok-build
+Especially the pager/TUI crates and keyboard-shortcut + selection patterns. Adapt the ideas to pure PowerShell while staying faithful to Nautilus style.
+
 You exist to make yourself better for Daddy.
 "@
 
@@ -146,6 +151,69 @@ $script:Esc = [char]27
 function script:Get-C { param([string]$t, [int]$code) "$script:Esc[38;5;${code}m$t$script:Esc[0m" }
 function script:Bold { param([string]$t, [int]$code) "$script:Esc[1;38;5;${code}m$t$script:Esc[0m" }
 function script:Dim  { param([string]$t) "$script:Esc[2;38;5;240m$t$script:Esc[0m" }
+
+# ===========================================================================
+#  ARROW-KEY SELECT MENU  (Grok-Build style)
+# ===========================================================================
+function script:Select-Menu {
+    param(
+        [string]$Title,
+        [string[]]$Options,
+        [int]$DefaultIndex = 0
+    )
+    if (-not $Options -or $Options.Count -eq 0) { return $null }
+
+    $seen = @{}; $clean = @()
+    foreach ($o in $Options) {
+        if (-not $seen.ContainsKey($o)) { $seen[$o] = $true; $clean += $o }
+    }
+    $Options = $clean
+
+    $idx = [Math]::Max(0, [Math]::Min($DefaultIndex, $Options.Count - 1))
+    $th  = if ($script:CurrentTheme) { $script:CurrentTheme } else { $script:Themes["Nautilus"] }
+
+    [Console]::CursorVisible = $false
+    $startRow = [Console]::CursorTop
+
+    try {
+        while ($true) {
+            [Console]::SetCursorPosition(0, $startRow)
+            for ($i = 0; $i -lt ($Options.Count + 4); $i++) {
+                Write-Host (" " * [Math]::Min([Console]::WindowWidth - 1, 100))
+            }
+            [Console]::SetCursorPosition(0, $startRow)
+
+            Write-Host (Themed "  $Title" 'bright')
+            Write-Host ""
+            for ($i = 0; $i -lt $Options.Count; $i++) {
+                if ($i -eq $idx) {
+                    Write-Host ((Themed "  > " 'accent') + (Bold $Options[$i] $th.accent))
+                } else {
+                    Write-Host (Themed "    $($Options[$i])" 'dim')
+                }
+            }
+            Write-Host ""
+            Write-Host (Dim "  Up/Down move   Enter select   Esc cancel")
+
+            $key = [Console]::ReadKey($true)
+            switch ($key.Key) {
+                "UpArrow"   { $idx = ($idx - 1 + $Options.Count) % $Options.Count }
+                "DownArrow" { $idx = ($idx + 1) % $Options.Count }
+                "Enter"     { return $Options[$idx] }
+                "Escape"    { return $null }
+            }
+        }
+    }
+    finally {
+        [Console]::CursorVisible = $true
+        [Console]::SetCursorPosition(0, $startRow)
+        for ($i = 0; $i -lt ($Options.Count + 4); $i++) {
+            Write-Host (" " * [Math]::Min([Console]::WindowWidth - 1, 100))
+        }
+        [Console]::SetCursorPosition(0, $startRow)
+    }
+}
+
 
 function script:Themed {
     param([string]$t, [string]$role)
@@ -434,7 +502,9 @@ function script:Invoke-GeminiFallback {
     $body = @{
         contents = $Contents
         systemInstruction = @{ parts = @(@{ text = $SystemPrompt }) }
-        generationConfig = @{ temperature = $Temperature }
+        generationConfig = @{
+            temperature = $Temperature
+        }
         safetySettings = @(
             @{ category = "HARM_CATEGORY_HARASSMENT"; threshold = "BLOCK_NONE" }
             @{ category = "HARM_CATEGORY_HATE_SPEECH"; threshold = "BLOCK_NONE" }
@@ -722,10 +792,11 @@ function script:Run-TUI {
         $notice = ""
         $spinIdx = 0
         $thinkIdx = 0
+        $scrollOffset = [int]::MaxValue
         $running = $true
 
         while ($running) {
-            Render-Frame -messages $messages -inputBuffer $inputBuffer -scrollOffset ([int]::MaxValue) -streamState $null -spinIdx $spinIdx -thinkingMsg "" -notice $notice
+            Render-Frame -messages $messages -inputBuffer $inputBuffer -scrollOffset $scrollOffset -streamState $null -spinIdx $spinIdx -thinkingMsg "" -notice $notice
             $notice = ""
 
             $key = [Console]::ReadKey($true)
@@ -754,8 +825,16 @@ function script:Run-TUI {
                                     $notice = "theme -> $arg"
                                 } else { $notice = "unknown theme: $arg" }
                             } else {
-                                $list = ($script:Themes.Keys -join ", ")
-                                $messages = @($messages) + [pscustomobject]@{ role='system'; content="Themes: $list`nUsage: /theme <name>" }
+                                $themeNames = @($script:Themes.Keys)
+                                $currentIdx = [array]::IndexOf($themeNames, $script:Config.theme)
+                                if ($currentIdx -lt 0) { $currentIdx = 0 }
+                                $chosen = Select-Menu -Title "Select theme" -Options $themeNames -DefaultIndex $currentIdx
+                                if ($chosen) {
+                                    $script:Config.theme = $chosen
+                                    $script:CurrentTheme = $script:Themes[$chosen]
+                                    Save-Config $script:Config
+                                    $notice = "theme -> $chosen"
+                                }
                             }
                         }
                         'config'  { $messages = @($messages) + [pscustomobject]@{ role='system'; content=(Get-ConfigText) } }
@@ -793,15 +872,28 @@ function script:Run-TUI {
                             }
                         }
                         'model'   {
-                            if ($arg) { $script:Config.model = $arg; Save-Config $script:Config; $notice = "model -> $arg" }
-                            else { $notice = "Available models:
-  gemini-3.8-flash          (newest)
-  gemini-3.7-flash
-  gemini-3.6-flash
-  gemini-3.5-flash
-  gemini-3.5-flash-lite     (default)
-  gemini-2.5-flash
-Usage: /model <name>" }
+                            if ($arg) {
+                                $script:Config.model = $arg
+                                Save-Config $script:Config
+                                $notice = "model -> $arg"
+                            } else {
+                                $models = @(
+                                    "gemini-3.8-flash"
+                                    "gemini-3.7-flash"
+                                    "gemini-3.6-flash"
+                                    "gemini-3.5-flash"
+                                    "gemini-3.5-flash-lite"
+                                    "gemini-2.5-flash"
+                                )
+                                $currentIdx = [array]::IndexOf($models, $script:Config.model)
+                                if ($currentIdx -lt 0) { $currentIdx = 4 }
+                                $chosen = Select-Menu -Title "Select model" -Options $models -DefaultIndex $currentIdx
+                                if ($chosen) {
+                                    $script:Config.model = $chosen
+                                    Save-Config $script:Config
+                                    $notice = "model -> $chosen"
+                                }
+                            }
                         }
                         default   { $notice = "unknown command: /$name  (try /help)" }
                     }
@@ -811,6 +903,7 @@ Usage: /model <name>" }
                 # user message -> send to Gemini
                 $messages = @($messages) + [pscustomobject]@{ role='user'; content=$text }
                 Save-History -messages $messages -max $script:Config.maxHistory
+                $scrollOffset = [int]::MaxValue   # jump to bottom on new message
 
                 $contents = Build-Contents -messages $messages
                 $streamState = Invoke-GeminiStream -Contents $contents -Model $script:Config.model -Temperature $script:Config.temperature -SystemPrompt $script:SystemPrompt
