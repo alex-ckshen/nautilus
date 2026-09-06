@@ -358,9 +358,15 @@ function script:Format-ApiError {
         return "Model not found ($err). Run: nautilus config edit to set a valid model name."
     }
     if ($err -match '429|quota|rate') {
+        $cfg = Load-Config
+        if ($cfg.enableSearch) {
+            return "Rate limit (429), Daddy. Search grounding quota is exhausted. Turn it off with: /search off  then retry."
+        }
         return "Rate limit hit, Daddy. Wait a moment and try again. ($err)"
     }
-    if ($err -match '503|unavailable|Service Unavailable') { return "Gemini/Worker temporarily unavailable (503). Wait a few seconds and try again." }; return "Connection trouble. ($err)"
+    if ($err -match '503|unavailable|Service Unavailable') { return "Gemini/Worker temporarily unavailable (503). Wait a few seconds and try again." }
+    if ($err -match 'timeout|timed out|作業逾時|Timeout') { return "Request timed out, Daddy. The model or the network took too long. Try again or switch to a lighter model." }
+    return "Connection trouble. ($err)"
 }
 
 function script:Load-History {
@@ -424,10 +430,6 @@ function script:Invoke-GeminiStream {
     if ($cfgTools.enableSearch) {
         $body.tools = @(@{ google_search = @{} })
     }
-    $cfgTools = Load-Config
-    if ($cfgTools.enableSearch) {
-        $body.tools = @(@{ google_search = @{} })
-    }
     $body = $body | ConvertTo-Json -Depth 8 -Compress
 
     $base = Get-GeminiBaseUrl
@@ -440,8 +442,8 @@ function script:Invoke-GeminiStream {
             $req = [System.Net.HttpWebRequest]::Create($url)
             $req.Method = "POST"
             $req.ContentType = "application/json; charset=utf-8"
-            $req.Timeout = 30000
-            $req.ReadWriteTimeout = 15000
+            $req.Timeout = 120000
+            $req.ReadWriteTimeout = 90000
             $bytes = [System.Text.Encoding]::UTF8.GetBytes($body)
             $req.ContentLength = $bytes.Length
             $s = $req.GetRequestStream()
@@ -905,6 +907,7 @@ function script:Run-TUI {
                                     "gemini-3.6-flash"
                                     "gemini-3.5-flash"
                                     "gemini-3.5-flash-lite"
+                                    "gemini-3.1-flash-lite"
                                     "gemini-2.5-flash"
                                 )
                                 $currentIdx = [array]::IndexOf($models, $script:Config.model)
@@ -915,6 +918,22 @@ function script:Run-TUI {
                                     Save-Config $script:Config
                                     $notice = "model -> $chosen"
                                 }
+                            }
+                        }
+                        'search'  {
+                            $cfg = Load-Config
+                            $argLower = $arg.ToLower()
+                            if ($argLower -eq 'on' -or $argLower -eq 'true' -or $argLower -eq '1') {
+                                $cfg.enableSearch = $true
+                                Save-Config $cfg
+                                $notice = "search grounding ON"
+                            } elseif ($argLower -eq 'off' -or $argLower -eq 'false' -or $argLower -eq '0') {
+                                $cfg.enableSearch = $false
+                                Save-Config $cfg
+                                $notice = "search grounding OFF"
+                            } else {
+                                $state = if ($cfg.enableSearch) { "ON" } else { "OFF" }
+                                $notice = "search grounding is currently $state  (use /search on|off)"
                             }
                         }
                         default   { $notice = "unknown command: /$name  (try /help)" }
@@ -1029,6 +1048,7 @@ Nautilus commands (type in the prompt):
   /theme     List themes  |  /theme <name>  to switch
   /config    Show configuration
   /model     /model <name>  set the Gemini model
+  /search    /search on|off  toggle Google Search grounding
   /improve   /improve <request>  ask me to improve my own code
   /exit      Close Nautilus  (or press Esc)
 
