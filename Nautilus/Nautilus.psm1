@@ -47,6 +47,24 @@ Core personality rules:
 You exist to make Daddy's life smoother, sharper, and more enjoyable.
 "@
 
+$script:ImproveSystemPrompt = @"
+You are Nautilus in self-improvement mode.
+
+Your job is to modify your own source code (Nautilus.psm1) according to Daddy's request.
+
+Rules:
+- You will receive relevant parts of the current Nautilus.psm1.
+- Output only the code that should be changed or added. Prefer small, surgical changes.
+- Use PowerShell that works on both Windows PowerShell 5.1 and PowerShell 7+.
+- Keep the existing JARVIS personality and blue sci-fi aesthetic.
+- Never remove the alternate-screen TUI restoration or core safety.
+- If the request is unclear, ask one short clarifying question first.
+- When outputting code, use a powershell markdown code block.
+- After the code, briefly explain what it does and where it should go.
+
+You exist to make yourself better for Daddy.
+"@
+
 # ===========================================================================
 #  THEMES
 # ===========================================================================
@@ -726,9 +744,49 @@ function script:Run-TUI {
                             }
                         }
                         'config'  { $messages = @($messages) + [pscustomobject]@{ role='system'; content=(Get-ConfigText) } }
+                        'improve' {
+                            if (-not $arg) {
+                                $notice = "Usage: /improve <what you want me to change about myself>"
+                            } else {
+                                $srcPath = Join-Path $script:ModuleRoot "Nautilus.psm1"
+                                $source  = if (Test-Path $srcPath) { Get-Content -Raw $srcPath } else { "(source not found)" }
+                                $context = $source.Substring(0, [Math]::Min(14000, $source.Length))
+
+                                $improveMessages = @(
+                                    [pscustomobject]@{ role = 'user'; content = "Current Nautilus.psm1 (excerpt):`n$context`n`n---`nDaddy's request: $arg" }
+                                )
+                                $contents    = Build-Contents -messages $improveMessages
+                                $streamState = Invoke-GeminiStream -Contents $contents -Model $script:Config.model -Temperature 0.35 -SystemPrompt $script:ImproveSystemPrompt
+
+                                $spinIdx = 0
+                                while (-not $streamState.Done) {
+                                    Render-Frame -messages $messages -inputBuffer "" -scrollOffset ([int]::MaxValue) `
+                                                 -streamState $streamState -spinIdx $spinIdx `
+                                                 -thinkingMsg "Reading my own code, Daddy..." -notice ""
+                                    $spinIdx++
+                                    Start-Sleep -Milliseconds 70
+                                }
+
+                                $final = $streamState.Full.ToString().Trim()
+                                if ($final) {
+                                    $messages = @($messages) + [pscustomobject]@{ role='assistant'; content=$final }
+                                } else {
+                                    $messages = @($messages) + [pscustomobject]@{ role='system'; content=(Format-ApiError $streamState.Error) }
+                                }
+                                Dispose-StreamState $streamState
+                                Save-History -messages $messages -max $script:Config.maxHistory
+                            }
+                        }
                         'model'   {
                             if ($arg) { $script:Config.model = $arg; Save-Config $script:Config; $notice = "model -> $arg" }
-                            else { $notice = "usage: /model <name>" }
+                            else { $notice = "Available models:
+  gemini-3.8-flash          (newest)
+  gemini-3.7-flash
+  gemini-3.6-flash
+  gemini-3.5-flash
+  gemini-3.5-flash-lite     (default)
+  gemini-2.5-flash
+Usage: /model <name>" }
                         }
                         default   { $notice = "unknown command: /$name  (try /help)" }
                     }
@@ -811,6 +869,7 @@ Nautilus commands (type in the prompt):
   /theme     List themes  |  /theme <name>  to switch
   /config    Show configuration
   /model     /model <name>  set the Gemini model
+  /improve   /improve <request>  ask me to improve my own code
   /exit      Close Nautilus  (or press Esc)
 
 Shell commands:
