@@ -170,30 +170,41 @@ function script:Select-Menu {
     $Options = $clean
 
     $idx = [Math]::Max(0, [Math]::Min($DefaultIndex, $Options.Count - 1))
-    $th  = if ($script:CurrentTheme) { $script:CurrentTheme } else { $script:Themes["Nautilus"] }
+    $th  = if ($script:CurrentTheme) { $script:CurrentTheme } else { $script:Themes["Midnight"] }
+    $esc = $script:Esc
+    $w   = [Console]::WindowWidth
+    $h   = [Console]::WindowHeight
+
+    $boxHeight = $Options.Count + 5
+    $startRow  = [Math]::Max(2, [int](($h - $boxHeight) / 2))
+    $startCol  = 4
 
     [Console]::CursorVisible = $false
-    $startRow = [Console]::CursorTop
-
     try {
         while ($true) {
-            [Console]::SetCursorPosition(0, $startRow)
-            for ($i = 0; $i -lt ($Options.Count + 4); $i++) {
-                Write-Host (" " * [Math]::Min([Console]::WindowWidth - 1, 100))
+            # Clear fixed region only (absolute coords — never stacks)
+            for ($r = $startRow; $r -lt ($startRow + $boxHeight + 1); $r++) {
+                Write-Host ("$esc[$r;1H" + (" " * [Math]::Max(0, $w - 1))) -NoNewline
             }
-            [Console]::SetCursorPosition(0, $startRow)
 
-            Write-Host (Themed "  $Title" 'bright')
-            Write-Host ""
+            $row = $startRow
+            Write-Host ("$esc[$row;${startCol}H" + (Themed $Title 'bright')) -NoNewline
+            $row++
+            Write-Host ("$esc[$row;${startCol}H") -NoNewline
+            $row++
+
             for ($i = 0; $i -lt $Options.Count; $i++) {
                 if ($i -eq $idx) {
-                    Write-Host ((Themed "  > " 'accent') + (Bold $Options[$i] $th.accent))
+                    $line = (Themed "  > " 'accent') + (Bold $Options[$i] $th.accent)
                 } else {
-                    Write-Host (Themed "    $($Options[$i])" 'dim')
+                    $line = (Themed "    $($Options[$i])" 'dim')
                 }
+                Write-Host ("$esc[$row;${startCol}H$line") -NoNewline
+                $row++
             }
-            Write-Host ""
-            Write-Host (Dim "  Up/Down move   Enter select   Esc cancel")
+
+            $row++
+            Write-Host ("$esc[$row;${startCol}H" + (Dim "Up/Down move   Enter select   Esc cancel")) -NoNewline
 
             $key = [Console]::ReadKey($true)
             switch ($key.Key) {
@@ -205,20 +216,16 @@ function script:Select-Menu {
         }
     }
     finally {
-        [Console]::CursorVisible = $true
-        [Console]::SetCursorPosition(0, $startRow)
-        for ($i = 0; $i -lt ($Options.Count + 4); $i++) {
-            Write-Host (" " * [Math]::Min([Console]::WindowWidth - 1, 100))
+        for ($r = $startRow; $r -lt ($startRow + $boxHeight + 1); $r++) {
+            Write-Host ("$esc[$r;1H" + (" " * [Math]::Max(0, $w - 1))) -NoNewline
         }
-        [Console]::SetCursorPosition(0, $startRow)
+        [Console]::CursorVisible = $true
     }
 }
-
-
 function script:Themed {
     param([string]$t, [string]$role)
     $th = $script:CurrentTheme
-    if (-not $th) { $th = $script:Themes["Nautilus"] }
+    if (-not $th) { $th = $script:Themes["Midnight"] }
     if (-not $th) { return $t }
     $code = switch ($role) {
         'accent'    { $th.accent }
@@ -278,13 +285,14 @@ function script:VisibleLen {
 function script:Load-Config {
     $cfg = [ordered]@{
         model        = $script:DefaultModel
-        theme        = "Nautilus"
+        theme        = "Midnight"
         temperature  = 0.85
         maxHistory   = 50
         personality  = $true
         apiKey       = ""
         keyUrl       = ""
         proxyUrl     = $script:DefaultProxyUrl
+        enableSearch = $true
     }
     if (Test-Path $script:ConfigFile) {
         try {
@@ -352,7 +360,7 @@ function script:Format-ApiError {
     if ($err -match '429|quota|rate') {
         return "Rate limit hit, Daddy. Wait a moment and try again. ($err)"
     }
-    return "Connection trouble, Daddy. ($err)"
+    if ($err -match '503|unavailable|Service Unavailable') { return "Gemini/Worker temporarily unavailable (503). Wait a few seconds and try again." }; return "Connection trouble. ($err)"
 }
 
 function script:Load-History {
@@ -411,7 +419,16 @@ function script:Invoke-GeminiStream {
             @{ category = "HARM_CATEGORY_SEXUALLY_EXPLICIT"; threshold = "BLOCK_NONE" }
             @{ category = "HARM_CATEGORY_DANGEROUS_CONTENT"; threshold = "BLOCK_NONE" }
         )
-    } | ConvertTo-Json -Depth 8 -Compress
+    }
+    $cfgTools = Load-Config
+    if ($cfgTools.enableSearch) {
+        $body.tools = @(@{ google_search = @{} })
+    }
+    $cfgTools = Load-Config
+    if ($cfgTools.enableSearch) {
+        $body.tools = @(@{ google_search = @{} })
+    }
+    $body = $body | ConvertTo-Json -Depth 8 -Compress
 
     $base = Get-GeminiBaseUrl
     $url = "${base}/${Model}:streamGenerateContent?alt=sse"
@@ -511,6 +528,10 @@ function script:Invoke-GeminiFallback {
             @{ category = "HARM_CATEGORY_SEXUALLY_EXPLICIT"; threshold = "BLOCK_NONE" }
             @{ category = "HARM_CATEGORY_DANGEROUS_CONTENT"; threshold = "BLOCK_NONE" }
         )
+    }
+    $cfgTools = Load-Config
+    if ($cfgTools.enableSearch) {
+        $body.tools = @(@{ google_search = @{} })
     }
     $apiKey = Get-NautilusApiKey
     if ($null -eq $apiKey) { return $null, "No API key or proxy configured. Run: nautilus config edit" }
@@ -724,6 +745,7 @@ function script:Render-Frame {
 
     $total = $lines.Count
     $maxStart = [Math]::Max(0, $total - $chatHeight)
+    $script:LastMaxStart = $maxStart
     $start = [Math]::Min($scrollOffset, $maxStart)
     if ($total -le $chatHeight) { $start = 0 }
     $visible = $lines[$start..([Math]::Min($total - 1, $start + $chatHeight - 1))]
@@ -779,7 +801,7 @@ function script:Show-Startup {
 function script:Run-TUI {
     $script:Config = Load-Config
     $script:CurrentTheme = $script:Themes[$script:Config.theme]
-    if (-not $script:CurrentTheme) { $script:CurrentTheme = $script:Themes["Nautilus"]; $script:Config.theme = "Nautilus" }
+    if (-not $script:CurrentTheme) { $script:CurrentTheme = $script:Themes["Midnight"]; $script:Config.theme        = "Midnight" }
 
     Enable-VT
     $messages = Load-History
@@ -947,13 +969,43 @@ function script:Run-TUI {
                     $inputBuffer = $inputBuffer.Substring(0, $inputBuffer.Length - 1)
                 }
             } elseif ($key.Key -eq "UpArrow") {
-                $scrollOffset = [Math]::Max(0, $scrollOffset - 1)
+                # Leave pin-to-bottom and move up one line
+                if ($scrollOffset -eq [int]::MaxValue) {
+                    $max = if ($script:LastMaxStart -ge 0) { $script:LastMaxStart } else { 0 }
+                    $scrollOffset = [Math]::Max(0, $max - 1)
+                } else {
+                    $scrollOffset = [Math]::Max(0, $scrollOffset - 1)
+                }
             } elseif ($key.Key -eq "DownArrow") {
-                $scrollOffset = [Math]::Max(0, $scrollOffset + 1)
+                if ($scrollOffset -eq [int]::MaxValue) {
+                    # already pinned
+                } else {
+                    $max = if ($script:LastMaxStart -ge 0) { $script:LastMaxStart } else { 0 }
+                    if ($scrollOffset -ge $max) {
+                        $scrollOffset = [int]::MaxValue   # re-pin
+                    } else {
+                        $scrollOffset++
+                    }
+                }
             } elseif ($key.Key -eq "PageUp") {
-                $scrollOffset = [Math]::Max(0, $scrollOffset - 5)
+                if ($scrollOffset -eq [int]::MaxValue) {
+                    $max = if ($script:LastMaxStart -ge 0) { $script:LastMaxStart } else { 0 }
+                    $scrollOffset = [Math]::Max(0, $max - 5)
+                } else {
+                    $scrollOffset = [Math]::Max(0, $scrollOffset - 5)
+                }
             } elseif ($key.Key -eq "PageDown") {
-                $scrollOffset = $scrollOffset + 5
+                if ($scrollOffset -eq [int]::MaxValue) {
+                    # already pinned
+                } else {
+                    $max = if ($script:LastMaxStart -ge 0) { $script:LastMaxStart } else { 0 }
+                    $next = $scrollOffset + 5
+                    if ($next -ge $max) {
+                        $scrollOffset = [int]::MaxValue
+                    } else {
+                        $scrollOffset = $next
+                    }
+                }
             } else {
                 $ch = $key.KeyChar
                 if (-not [char]::IsControl($ch) -and $ch -ne [char]0) {
