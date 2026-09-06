@@ -2,7 +2,10 @@
     Nautilus - a pure-PowerShell futuristic TUI AI assistant.
     JARVIS-style personality, Gemini-powered, blue sci-fi aesthetic.
     Public command: nautilus  (alias: naut)
+    Version: 0.3.42.1
 #>
+
+$script:NautilusVersion = "0.3.42.1"
 
 # ===========================================================================
 #  PRIVATE CONFIG
@@ -650,7 +653,7 @@ function script:Render-Frame {
         return
     }
 
-    $titleBar = "  N A U T I L U S  "
+    $titleBar = "  N A U T I L U S  v$($script:NautilusVersion)  "
     $conn = "  $([char]0x25C9) connected  asia-01  "
     $modelTag = "model: $($script:Config.model)  "
     $padConn = $w - $titleBar.Length - $conn.Length - $modelTag.Length
