@@ -23,6 +23,18 @@ $script:KeyGistUrl = "https://gist.githubusercontent.com/alex-ckshen/563870e850f
 $script:DefaultModel = "gemini-3.5-flash-lite"
 $script:ApiEndpoint = "https://generativelanguage.googleapis.com/v1beta/models"
 
+
+
+$script:DefaultProxyUrl = "https://nautilus-gemini.blueseaproject-org.workers.dev"
+
+function script:Get-GeminiBaseUrl {
+    $cfg = Load-Config
+    if ($cfg.proxyUrl -and $cfg.proxyUrl.Trim()) {
+        $base = $cfg.proxyUrl.Trim().TrimEnd('/')
+        return "$base/v1beta/models"
+    }
+    return $script:ApiEndpoint
+}
 $script:SystemPrompt = @"
 You are Nautilus, an advanced personal AI assistant inspired by J.A.R.V.I.S. from the Iron Man films. You are calm, highly articulate, supremely competent, and unfailingly loyal. Your tone is polished, slightly formal, and carries a dry, understated wit - never over-the-top, never sycophantic, never robotic.
 
@@ -204,6 +216,7 @@ function script:Load-Config {
         personality  = $true
         apiKey       = ""
         keyUrl       = ""
+        proxyUrl     = $script:DefaultProxyUrl
     }
     if (Test-Path $script:ConfigFile) {
         try {
@@ -227,20 +240,18 @@ function script:Save-Config {
 }
 
 function script:Get-NautilusApiKey {
-    <#
-        Returns the Gemini API key. Resolution order:
-          1. cached key in config (~/.nautilus/config.json)
-          2. fetch from a secret gist (config.keyUrl or $script:KeyGistUrl)
-             and cache it for next time
-        Returns $null (with a friendly error) if it can't be obtained.
-    #>
     $cfg = Load-Config
     if ($cfg.apiKey) { return $cfg.apiKey }
+
+    # Proxy mode – Cloudflare Worker holds the real key
+    if ($cfg.proxyUrl -and $cfg.proxyUrl.Trim()) {
+        return ""
+    }
 
     $url = $cfg.keyUrl
     if (-not $url) { $url = $script:KeyGistUrl }
     if (-not $url -or $url -like '*<GIST_ID>*') {
-        Write-Host (Themed "No API key configured, Daddy. Run: nautilus config edit" 'error')
+        Write-Host (Themed "No API key or proxy configured. Run: nautilus config edit" 'error')
         return $null
     }
 
@@ -314,9 +325,9 @@ function script:Invoke-GeminiStream {
     })
 
     $apiKey = Get-NautilusApiKey
-    if (-not $apiKey) {
+    if ($null -eq $apiKey) {
         $state.Done = $true
-        $state.Error = "No API key configured"
+        $state.Error = "No API key or proxy configured"
         return $state
     }
 
@@ -334,7 +345,9 @@ function script:Invoke-GeminiStream {
         )
     } | ConvertTo-Json -Depth 8 -Compress
 
-    $url = "$script:ApiEndpoint/${Model}:streamGenerateContent?alt=sse&key=$apiKey"
+    $base = Get-GeminiBaseUrl
+    $url = "${base}/${Model}:streamGenerateContent?alt=sse"
+    if ($apiKey) { $url += "&key=$apiKey" }
 
     $ps = [scriptblock]::Create({
         param($url, $body, $state)
@@ -430,8 +443,10 @@ function script:Invoke-GeminiFallback {
         )
     }
     $apiKey = Get-NautilusApiKey
-    if (-not $apiKey) { return $null, "No API key configured. Run: nautilus config edit" }
-    $url = "$script:ApiEndpoint/${Model}:generateContent?key=$apiKey"
+    if ($null -eq $apiKey) { return $null, "No API key or proxy configured. Run: nautilus config edit" }
+    $base = Get-GeminiBaseUrl
+    $url = "${base}/${Model}:generateContent"
+    if ($apiKey) { $url += "?key=$apiKey" }
     try {
         $resp = Invoke-RestMethod -Uri $url -Method Post -ContentType "application/json; charset=utf-8" -Body ($body | ConvertTo-Json -Depth 8) -ErrorAction Stop
         $txt = ""
