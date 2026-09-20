@@ -1,3 +1,7 @@
+# 0.4.2.6
+
+- **After `/update`:** opens a new PowerShell window, runs `nautilus` there, then closes the old window (PS 5.1 still cannot reload the module in-process). Falls back to manual instructions if spawn fails.
+
 # 0.4.2.5
 
 - **Fix: Enter + Esc dead in prompt and slash menu** — `ENABLE_VIRTUAL_TERMINAL_INPUT` made Enter arrive as raw CR (no `ConsoleKey.Enter`) and Esc fight CSI/mouse peeks, so both were silently ignored. Removed that stdin flag; normalize CR/LF → Enter; bare Esc uses a 25ms CSI peek and is never dropped on parse failure. Arrow CSI + mouse SGR still work via ConPTY.

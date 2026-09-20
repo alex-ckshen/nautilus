@@ -2,10 +2,10 @@
     Nautilus - a pure-PowerShell futuristic TUI AI assistant.
     JARVIS-style personality, Gemini-powered, blue sci-fi aesthetic.
     Public command: nautilus  (alias: naut)
-    Version: 0.4.2.5
+    Version: 0.4.2.6
 #>
 
-$script:NautilusVersion = "0.4.2.5"
+$script:NautilusVersion = "0.4.2.6"
 $script:TuiActive = $false
 $script:TuiForceExit = $false
 $script:CancelHandlerRegistered = $false
@@ -1632,10 +1632,12 @@ function script:Invoke-PendingUpdateApply {
         }
     } catch { }
     if (-not $shown) { $shown = $target }
+    # Run-Update exits the process on success (after spawning a fresh window).
+    # These lines only run if Run-Update returned without exiting (unexpected).
     if ($shown) {
-        Write-Host "$esc[38;5;117m  Updated to v$shown -- this window will close; open a new PowerShell and run nautilus$esc[0m"
+        Write-Host "$esc[38;5;117m  Updated to v$shown. If a new window did not open, run nautilus in a fresh PowerShell.$esc[0m"
     } else {
-        Write-Host "$esc[38;5;117m  Update finished -- close this window, open a new PowerShell, then run nautilus$esc[0m"
+        Write-Host "$esc[38;5;117m  Update finished. If a new window did not open, run nautilus in a fresh PowerShell.$esc[0m"
     }
     Write-Host ""
 }
@@ -3848,6 +3850,82 @@ function script:Run-Theme {
     }
 }
 
+
+function script:Start-NautilusFreshSession {
+    # Spawn a NEW PowerShell that loads the on-disk module and runs nautilus.
+    # Used after self-update so PS 5.1 never has to Import-Module -Force itself.
+    # Returns $true if a process was started.
+    $esc = $script:Esc
+    $manifest = $null
+    try {
+        $candidate = Join-Path $script:ModuleRoot "Nautilus.psd1"
+        if (Test-Path -LiteralPath $candidate) { $manifest = $candidate }
+    } catch { }
+    if (-not $manifest) {
+        $fallback = Join-Path (Join-Path $HOME ".nautilus") (Join-Path "Nautilus" "Nautilus.psd1")
+        if (Test-Path -LiteralPath $fallback) { $manifest = $fallback }
+    }
+    if (-not $manifest) {
+        Write-Host "$esc[38;5;203m  Could not find installed Nautilus.psd1 to relaunch.$esc[0m"
+        return $false
+    }
+
+    $exe = $null
+    try {
+        if ($PSVersionTable.PSEdition -eq 'Core') {
+            $c = Get-Command -Name pwsh -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($c) { $exe = $c.Source }
+        }
+    } catch { }
+    if (-not $exe) {
+        try {
+            $c = Get-Command -Name powershell.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($c) { $exe = $c.Source }
+        } catch { }
+    }
+    if (-not $exe -and $env:OS -eq 'Windows_NT') {
+        $sys = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        if (Test-Path -LiteralPath $sys) { $exe = $sys }
+    }
+    if (-not $exe) {
+        try {
+            $c = Get-Command -Name pwsh -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($c) { $exe = $c.Source }
+        } catch { }
+    }
+    if (-not $exe) {
+        Write-Host "$esc[38;5;203m  No powershell.exe / pwsh found to open a new window.$esc[0m"
+        return $false
+    }
+
+    $mEsc = ([string]$manifest).Replace("'", "''")
+    # -NoExit keeps the window if nautilus exits; Import from the just-updated disk path.
+    $command = @"
+`$Host.UI.RawUI.WindowTitle = 'Nautilus'
+try {
+  Import-Module -Name '$mEsc' -Force -ErrorAction Stop
+  nautilus
+} catch {
+  Write-Host `$_.Exception.Message -ForegroundColor Red
+  Write-Host 'Update landed on disk, but launch failed. Run: nautilus' -ForegroundColor Yellow
+  try { Read-Host 'Press Enter to close' } catch { }
+}
+"@
+
+    try {
+        if ($env:OS -eq 'Windows_NT') {
+            Start-Process -FilePath $exe -ArgumentList @('-NoLogo', '-NoExit', '-Command', $command) | Out-Null
+        } else {
+            # Best-effort on non-Windows (dev hosts): new process, same TTY family
+            Start-Process -FilePath $exe -ArgumentList @('-NoLogo', '-NoExit', '-Command', $command) | Out-Null
+        }
+        return $true
+    } catch {
+        Write-Host "$esc[38;5;203m  Failed to open new window: $($_.Exception.Message)$esc[0m"
+        return $false
+    }
+}
+
 # ===========================================================================
 #  UPDATE / UNINSTALL
 # ===========================================================================
@@ -3999,11 +4077,18 @@ function script:Run-Update {
     } else {
         Write-Host "$esc[38;5;117m  Files updated.$esc[0m"
     }
-    Write-Host "$esc[38;5;221m  Closing this window so the old module cannot stay loaded.$esc[0m"
-    Write-Host "$esc[38;5;245m  Open a NEW PowerShell, then run: nautilus$esc[0m"
-    Write-Host "$esc[38;5;245m  (PS 5.1 cannot safely reload Nautilus in the same session.)$esc[0m"
-    # Force a new process — typing `naut` again here would still run the old in-memory module.
-    try { Start-Sleep -Milliseconds 800 } catch { }
+    # PS 5.1 cannot safely reload this module in-process — open a fresh window, then exit.
+    Write-Host "$esc[38;5;221m  Opening a new PowerShell with the updated Nautilus...$esc[0m"
+    $launched = $false
+    try { $launched = [bool](Start-NautilusFreshSession) } catch { $launched = $false }
+    if ($launched) {
+        Write-Host "$esc[38;5;245m  New window started. Closing this one so the old module cannot stay loaded.$esc[0m"
+        try { Start-Sleep -Milliseconds 500 } catch { }
+    } else {
+        Write-Host "$esc[38;5;221m  Could not auto-relaunch. Close this window, open a NEW PowerShell, then run: nautilus$esc[0m"
+        Write-Host "$esc[38;5;245m  (PS 5.1 cannot safely reload Nautilus in the same session.)$esc[0m"
+        try { Start-Sleep -Milliseconds 800 } catch { }
+    }
     exit 0
 }
 
