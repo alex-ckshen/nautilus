@@ -1,11 +1,11 @@
-﻿<#
+<#
     Nautilus - a pure-PowerShell futuristic TUI AI assistant.
     JARVIS-style personality, Gemini-powered, blue sci-fi aesthetic.
     Public command: nautilus  (alias: naut)
-    Version: 0.3.43.0
+    Version: 0.3.44.0
 #>
 
-$script:NautilusVersion = "0.3.43.0"
+$script:NautilusVersion = "0.3.44.0"
 $script:TuiActive = $false
 $script:TuiForceExit = $false
 $script:CancelHandlerRegistered = $false
@@ -21,6 +21,14 @@ $script:HistoryFile     = Join-Path $script:NautilusHome "history.json"
 $script:RepoBase        = "https://alex-ckshen.github.io/nautilus"
 $script:InstallRoot     = Join-Path $HOME ".nautilus"
 $script:ModuleRoot      = Join-Path $script:InstallRoot "Nautilus"
+
+# Ensure ~/.nautilus exists at import time (never throw on import).
+try {
+    if (-not (Test-Path -LiteralPath $script:NautilusHome)) {
+        New-Item -ItemType Directory -Path $script:NautilusHome -Force -ErrorAction Stop | Out-Null
+    }
+} catch { }
+
 
 # Embedded per spec - no user prompting required.
 # The API key is fetched from a secret gist Alex controls (never stored in the
@@ -169,67 +177,122 @@ function script:Select-Menu {
         [string[]]$Options,
         [int]$DefaultIndex = 0
     )
-    if (-not $Options -or $Options.Count -eq 0) { return $null }
+    if (-not $Options -or @($Options).Count -eq 0) { return $null }
 
     $seen = @{}; $clean = @()
-    foreach ($o in $Options) {
-        if (-not $seen.ContainsKey($o)) { $seen[$o] = $true; $clean += $o }
+    foreach ($o in @($Options)) {
+        if ($null -eq $o) { continue }
+        $s = [string]$o
+        if (-not $seen.ContainsKey($s)) { $seen[$s] = $true; $clean += $s }
     }
     $Options = $clean
+    if ($Options.Count -eq 0) { return $null }
 
     $idx = [Math]::Max(0, [Math]::Min($DefaultIndex, $Options.Count - 1))
-    $th  = if ($script:CurrentTheme) { $script:CurrentTheme } else { $script:Themes["Midnight"] }
+    $th  = if ($script:CurrentTheme) { $script:CurrentTheme } else { $script:Themes["Nautilus"] }
     $esc = $script:Esc
-    $w   = [Console]::WindowWidth
-    $h   = [Console]::WindowHeight
 
-    $boxHeight = $Options.Count + 5
-    $startRow  = [Math]::Max(2, [int](($h - $boxHeight) / 2))
-    $startCol  = 4
+    $prevCursor = $true
+    try { $prevCursor = [Console]::CursorVisible } catch { $prevCursor = $true }
+    try { [Console]::CursorVisible = $false } catch { }
 
-    [Console]::CursorVisible = $false
+    $result = $null
     try {
         while ($true) {
+            try {
+                $w = [Console]::WindowWidth
+                $h = [Console]::WindowHeight
+            } catch {
+                $w = 80; $h = 24
+            }
+            if ($w -lt 20) { $w = 20 }
+            if ($h -lt 8)  { $h = 8 }
+
+            # Clamp visible options to window (keep title + hint rows)
+            $maxVisible = [Math]::Max(1, $h - 6)
+            $boxHeight  = [Math]::Min($Options.Count, $maxVisible) + 5
+            $startRow   = [Math]::Max(1, [int](($h - $boxHeight) / 2))
+            $startCol   = 2
+            if ($startCol + 10 -gt $w) { $startCol = 1 }
+
+            $viewTop = 0
+            if ($Options.Count -gt $maxVisible) {
+                $viewTop = [Math]::Max(0, [Math]::Min($idx - [int]($maxVisible / 2), $Options.Count - $maxVisible))
+            }
+            $viewEnd = [Math]::Min($Options.Count, $viewTop + $maxVisible)
+
             # Clear fixed region only (absolute coords — never stacks)
+            $clearW = [Math]::Max(0, $w - 1)
             for ($r = $startRow; $r -lt ($startRow + $boxHeight + 1); $r++) {
-                Write-Host ("$esc[$r;1H" + (" " * [Math]::Max(0, $w - 1))) -NoNewline
+                if ($r -gt $h) { break }
+                Write-Host ("$esc[$r;1H" + (" " * $clearW)) -NoNewline
             }
 
             $row = $startRow
-            Write-Host ("$esc[$row;${startCol}H" + (Themed $Title 'bright')) -NoNewline
+            $titleText = if ($Title) { $Title } else { "Select" }
+            Write-Host ("$esc[$row;${startCol}H" + (Themed $titleText 'bright')) -NoNewline
             $row++
             Write-Host ("$esc[$row;${startCol}H") -NoNewline
             $row++
 
-            for ($i = 0; $i -lt $Options.Count; $i++) {
+            for ($i = $viewTop; $i -lt $viewEnd; $i++) {
+                $label = $Options[$i]
+                $maxLabel = [Math]::Max(8, $w - $startCol - 6)
+                if ($label.Length -gt $maxLabel) { $label = $label.Substring(0, $maxLabel - 1) + [char]0x2026 }
                 if ($i -eq $idx) {
-                    $line = (Themed "  > " 'accent') + (Bold $Options[$i] $th.accent)
+                    $line = (Themed "  > " 'accent') + (Bold $label $th.accent)
                 } else {
-                    $line = (Themed "    $($Options[$i])" 'dim')
+                    $line = (Themed "    $label" 'dim')
                 }
                 Write-Host ("$esc[$row;${startCol}H$line") -NoNewline
                 $row++
             }
 
             $row++
-            Write-Host ("$esc[$row;${startCol}H" + (Dim "Up/Down move   Enter select   Esc cancel")) -NoNewline
+            if ($row -le $h) {
+                Write-Host ("$esc[$row;${startCol}H" + (Dim "Up/Down move   Enter select   Esc cancel")) -NoNewline
+            }
 
-            $key = [Console]::ReadKey($true)
+            try {
+                $key = [Console]::ReadKey($true)
+            } catch {
+                return $null
+            }
+
+            $done = $false
             switch ($key.Key) {
                 "UpArrow"   { $idx = ($idx - 1 + $Options.Count) % $Options.Count }
                 "DownArrow" { $idx = ($idx + 1) % $Options.Count }
-                "Enter"     { return $Options[$idx] }
-                "Escape"    { return $null }
+                "Home"      { $idx = 0 }
+                "End"       { $idx = $Options.Count - 1 }
+                "Enter"     { $result = $Options[$idx]; $done = $true }
+                "Escape"    { $result = $null; $done = $true }
+                default {
+                    if ($key.KeyChar -eq [char]13) { $result = $Options[$idx]; $done = $true }
+                    elseif ($key.KeyChar -eq [char]27) { $result = $null; $done = $true }
+                }
             }
+            if ($done) { break }
         }
     }
     finally {
+        try {
+            $w = [Console]::WindowWidth
+            $h = [Console]::WindowHeight
+        } catch { $w = 80; $h = 24 }
+        $clearW = [Math]::Max(0, $w - 1)
+        $boxHeight = [Math]::Min($Options.Count, [Math]::Max(1, $h - 6)) + 5
+        $startRow  = [Math]::Max(1, [int](($h - $boxHeight) / 2))
         for ($r = $startRow; $r -lt ($startRow + $boxHeight + 1); $r++) {
-            Write-Host ("$esc[$r;1H" + (" " * [Math]::Max(0, $w - 1))) -NoNewline
+            if ($r -gt $h) { break }
+            try { Write-Host ("$esc[$r;1H" + (" " * $clearW)) -NoNewline } catch { }
         }
-        [Console]::CursorVisible = $true
+        # Restore prior cursor visibility (TUI keeps it hidden)
+        try { [Console]::CursorVisible = $prevCursor } catch { }
     }
+    return $result
 }
+
 function script:Themed {
     param([string]$t, [string]$role)
     $th = $script:CurrentTheme
@@ -267,7 +330,6 @@ function script:Wrap-Text {
         $cur = ""
         foreach ($w in $words) {
             if ([string]::IsNullOrEmpty($w)) { continue }
-            # Hard-break tokens longer than the wrap width
             while ($w.Length -gt $width) {
                 if ($cur.Length -gt 0) { $out.Add($cur); $cur = "" }
                 $out.Add($w.Substring(0, $width))
@@ -308,7 +370,7 @@ function script:Load-Config {
         apiKey       = ""
         keyUrl       = ""
         proxyUrl     = $script:DefaultProxyUrl
-        enableSearch = $true
+        enableSearch = $false
     }
     if (Test-Path $script:ConfigFile) {
         try {
@@ -459,7 +521,6 @@ function script:Invoke-GeminiStream {
 
     $ps = [scriptblock]::Create({
         param($url, $body, $state)
-        $req = $null; $resp = $null; $reader = $null
         try {
             $req = [System.Net.HttpWebRequest]::Create($url)
             $req.Method = "POST"
@@ -492,19 +553,17 @@ function script:Invoke-GeminiStream {
                 if ($parts) {
                     foreach ($p in $parts) {
                         if ($p.text) {
-                            [System.Threading.Monitor]::Enter($state.Full)
-                            try { [void]$state.Full.Append($p.text) }
-                            finally { [System.Threading.Monitor]::Exit($state.Full) }
+                            [void]$state.Full.Append($p.text)
                             $state.Chunks.Enqueue($p.text)
                         }
                     }
                 }
             }
+            $reader.Close()
+            $resp.Close()
         } catch {
             $state.Error = $_.Exception.Message
         } finally {
-            try { if ($reader) { $reader.Close() } } catch { }
-            try { if ($resp) { $resp.Close() } } catch { }
             $state.Done = $true
         }
     })
@@ -560,13 +619,7 @@ function script:Dispose-StreamState {
 function script:Get-StreamFullText {
     param($state)
     if ($null -eq $state -or $null -eq $state.Full) { return "" }
-    try {
-        [System.Threading.Monitor]::Enter($state.Full)
-        try { return $state.Full.ToString() }
-        finally { [System.Threading.Monitor]::Exit($state.Full) }
-    } catch {
-        try { return $state.Full.ToString() } catch { return "" }
-    }
+    try { return $state.Full.ToString() } catch { return "" }
 }
 
 function script:Invoke-GeminiFallback {
@@ -647,6 +700,7 @@ $script:StatusLines = @(
 function script:Enable-VT {
     # PowerShell 7 enables VT by default; for Windows PowerShell 5.1 we must
     # flip ENABLE_VIRTUAL_TERMINAL_PROCESSING on the current console handle.
+    # Never throw — module import and TUI degrade gracefully without VT.
     if ($PSVersionTable.PSVersion.Major -lt 6) {
         try {
             $sig = @'
@@ -654,27 +708,103 @@ function script:Enable-VT {
 [DllImport("kernel32.dll")] public static extern bool GetConsoleMode(System.IntPtr hConsoleHandle, out uint lpMode);
 [DllImport("kernel32.dll")] public static extern bool SetConsoleMode(System.IntPtr hConsoleHandle, uint dwMode);
 '@
-            $type = Add-Type -MemberDefinition $sig -Name 'NautilusCon' -Namespace 'Nautilus' -PassThru -ErrorAction Stop
-            $h = $type::GetStdHandle(-11)
-            $mode = 0
-            [void]$type::GetConsoleMode($h, [ref]$mode)
-            [void]$type::SetConsoleMode($h, $mode -bor 0x0004)
+            $type = $null
+            try { $type = [Nautilus.NautilusCon] } catch { $type = $null }
+            if (-not $type) {
+                try {
+                    $type = Add-Type -MemberDefinition $sig -Name 'NautilusCon' -Namespace 'Nautilus' -PassThru -ErrorAction Stop
+                } catch {
+                    # Type may already exist from a prior import in this process
+                    try { $type = [Nautilus.NautilusCon] } catch { $type = $null }
+                }
+            }
+            if ($type) {
+                $h = $type::GetStdHandle(-11)
+                if ($h -ne [IntPtr]::Zero -and $h.ToInt64() -ne -1) {
+                    $mode = [uint32]0
+                    if ($type::GetConsoleMode($h, [ref]$mode)) {
+                        [void]$type::SetConsoleMode($h, $mode -bor 0x0004)
+                    }
+                }
+            }
         } catch { }
     }
     try { Set-ItemProperty "HKCU:\Console" "VirtualTerminalLevel" -Type DWord 1 -ErrorAction SilentlyContinue } catch { }
 }
 
+function script:Test-NautilusHost {
+    <#
+      Checks whether this host can run the interactive TUI.
+      Returns a hashtable: Ok (bool), Reasons (string[]), Info (hashtable).
+    #>
+    $reasons = New-Object System.Collections.Generic.List[string]
+    $info = [ordered]@{
+        PSVersion     = $PSVersionTable.PSVersion.ToString()
+        IsWindows     = ($env:OS -eq 'Windows_NT')
+        HasConsole    = $false
+        WindowWidth   = 0
+        WindowHeight  = 0
+        KeyAvailable  = $false
+        HostName      = try { $Host.Name } catch { "unknown" }
+    }
+
+    # Real console attached?
+    try {
+        $w = [Console]::WindowWidth
+        $h = [Console]::WindowHeight
+        $info.WindowWidth = $w
+        $info.WindowHeight = $h
+        $info.HasConsole = ($w -gt 0 -and $h -gt 0)
+    } catch {
+        $info.HasConsole = $false
+        $info.WindowWidth = 0
+        $info.WindowHeight = 0
+    }
+
+    if (-not $info.HasConsole) {
+        $reasons.Add("No interactive console attached (ISE, redirected stdin, or non-console host). Use Windows Terminal, conhost, or pwsh.exe.")
+    } else {
+        if ($info.WindowWidth -lt 40 -or $info.WindowHeight -lt 12) {
+            $reasons.Add("Terminal too small ($($info.WindowWidth)x$($info.WindowHeight)). Need at least 40x12.")
+        }
+        try {
+            $null = [Console]::KeyAvailable
+            $info.KeyAvailable = $true
+        } catch {
+            $info.KeyAvailable = $false
+            $reasons.Add("[Console]::KeyAvailable / ReadKey unavailable in this host.")
+        }
+    }
+
+    # Known unsuitable hosts
+    $hn = [string]$info.HostName
+    if ($hn -match 'ISE Host|ServerRemoteHost') {
+        $reasons.Add("Host '$hn' does not support the Nautilus TUI. Open a normal console instead.")
+    }
+
+    if ($PSVersionTable.PSVersion.Major -lt 5) {
+        $reasons.Add("PowerShell $($info.PSVersion) is too old. Need 5.1 or later.")
+    }
+
+    return [pscustomobject]@{
+        Ok      = ($reasons.Count -eq 0)
+        Reasons = @($reasons)
+        Info    = $info
+    }
+}
+
 function script:Enter-TUI {
-    [Console]::CursorVisible = $false
-    Write-Host "$script:Esc[?1049h" -NoNewline   # alternate screen
-    Write-Host "$script:Esc[?25l" -NoNewline     # hide cursor
-    Write-Host "$script:Esc[2J" -NoNewline       # clear
+    try { [Console]::CursorVisible = $false } catch { }
+    try {
+        Write-Host "$script:Esc[?1049h" -NoNewline   # alternate screen
+        Write-Host "$script:Esc[?25l" -NoNewline     # hide cursor
+        Write-Host "$script:Esc[2J" -NoNewline       # clear
+    } catch {
+        throw "Failed to enter alternate screen. Use a real console host (Windows Terminal / conhost)."
+    }
     $script:TuiActive = $true
 }
 function script:Exit-TUI {
-    if (-not $script:TuiActive) {
-        # Still best-effort restore in case of partial entry
-    }
     try {
         Write-Host "$script:Esc[?1049l" -NoNewline  # leave alternate screen
         Write-Host "$script:Esc[?25h" -NoNewline    # show cursor
@@ -685,8 +815,7 @@ function script:Exit-TUI {
 }
 
 function script:Register-TuiCancelHandler {
-    # Restore alternate screen on Ctrl+C. Safe to call multiple times.
-    # Inline ANSI here: event handlers may not resolve module script: functions.
+    # Inline ANSI: CancelKeyPress handlers may not resolve module functions.
     if ($script:CancelHandlerRegistered) { return }
     try {
         $script:CancelHandler = [ConsoleCancelEventHandler]{
@@ -703,7 +832,6 @@ function script:Register-TuiCancelHandler {
         [Console]::add_CancelKeyPress($script:CancelHandler)
         $script:CancelHandlerRegistered = $true
     } catch {
-        # Some hosts (ISE, remoting) have no CancelKeyPress — try/finally still covers most exits
         $script:CancelHandlerRegistered = $false
     }
 }
@@ -729,12 +857,6 @@ function script:Write-At {
     Write-Host "$script:Esc[$($row);$($col)H$text$suffix" -NoNewline
 }
 
-function script:Clear-Row {
-    param([int]$row, [int]$width)
-    $w = [Math]::Max(0, $width)
-    Write-Host ("$script:Esc[$row;1H" + (" " * $w) + "$script:Esc[$row;1H") -NoNewline
-}
-
 function script:Render-Frame {
     param(
         [array]$messages,
@@ -751,25 +873,9 @@ function script:Render-Frame {
     $h = [Console]::WindowHeight
     if ($w -lt 30 -or $h -lt 12) {
         Clear-Screen
-        Write-At 1 1 (Themed "Nautilus needs a larger terminal window." 'error') -ClearEol
+        Write-At 1 1 (Themed "Nautilus needs a larger terminal window." 'error')
         return
     }
-
-    # Layout (1-based rows):
-    #   1          title bar
-    #   2          top border
-    #   3..h-3     chat viewport
-    #   h-2        bottom border
-    #   h-1        status
-    #   h          input
-    $chatTop    = 3
-    $chatBottom = $h - 3
-    $chatHeight = [Math]::Max(1, $chatBottom - $chatTop + 1)
-    $chatWidth  = [Math]::Max(10, $w - 2)
-    $statusRow  = $h - 1
-    $inputRow   = $h
-    $borderRowT = 2
-    $borderRowB = $h - 2
 
     $titleBar = "  N A U T I L U S  v$($script:NautilusVersion)  "
     $conn = "  $([char]0x25C9) connected  asia-01  "
@@ -779,27 +885,33 @@ function script:Render-Frame {
     if ($padConn -lt 0) { $padConn = 0 }
     $topLine = (Themed $titleBar 'bright') + (Themed (" " * $padConn) 'titlebar') + (Themed $conn 'accent') + (Themed $modelTag 'dim')
 
-    $borderTop = (Themed ([string]([char]0x2550) * [Math]::Max(1, $w - 1)) 'border')
+    $borderTop = (Themed ([string]([char]0x2550) * $w) 'border')
     $borderBot = $borderTop
+
+    $inputRow = $h
+    $statusRow = $h - 1
+    $chatTop = 3
+    $chatBottom = $h - 3
+    $chatHeight = $chatBottom - $chatTop + 1
+    $chatWidth = $w - 2
 
     # Build rendered lines for the chat area
     $lines = New-Object System.Collections.Generic.List[object]
-    if ($null -eq $messages) { $messages = @() }
     foreach ($m in $messages) {
         $label = switch ($m.role) {
             'user'      { "Daddy" }
-            'assistant' { "Nautilus" }
+            'assistant'  { "Nautilus" }
             default     { "System" }
-        }
-        $roleName = switch ($m.role) {
-            'user'      { 'user' }
-            'assistant' { 'assistant' }
-            default     { 'system' }
         }
         $roleCode = switch ($m.role) {
             'user'      { $th.user }
             'assistant' { $th.assistant }
             default     { $th.system }
+        }
+        $roleName = switch ($m.role) {
+            'user'      { 'user' }
+            'assistant' { 'assistant' }
+            default     { 'system' }
         }
         $prefix = (Bold "$label " $roleCode) + (Themed ([string]([char]0x203A) + " ") $roleName)
         $prefixLen = [Math]::Max(2, (VisibleLen $prefix))
@@ -819,7 +931,8 @@ function script:Render-Frame {
 
     # In-progress streaming message
     if ($streamState -and -not $streamState.Done) {
-        $prefix = (Bold "Nautilus " $th.assistant) + (Themed ([string]([char]0x203A) + " ") 'assistant')
+        $label = "Nautilus"
+        $prefix = (Bold "$label " $th.assistant) + (Themed ([string]([char]0x203A) + " ") 'assistant')
         $prefixLen = [Math]::Max(2, (VisibleLen $prefix))
         $partial = Get-StreamFullText $streamState
         if ([string]::IsNullOrEmpty($partial)) {
@@ -840,12 +953,8 @@ function script:Render-Frame {
             $sp = $script:Spinner[$spinIdx % $script:Spinner.Count]
             $lines.Add(@{ text = (" " * $prefixLen) + (Themed "$sp" 'dim'); role = "assistant" })
         }
-    } elseif ($streamState -and $streamState.Done) {
-        $fullStr = Get-StreamFullText $streamState
-        if (-not [string]::IsNullOrEmpty($streamState.Error) -and [string]::IsNullOrEmpty($fullStr)) {
-            $prefix = (Bold "Nautilus " $th.assistant) + (Themed ([string]([char]0x203A) + " ") 'assistant')
-            $lines.Add(@{ text = $prefix + (Themed (Format-ApiError $streamState.Error) 'error'); role = "assistant" })
-        }
+    } elseif ($streamState -and $streamState.Done -and -not [string]::IsNullOrEmpty($streamState.Error) -and [string]::IsNullOrEmpty($streamState.Full.ToString())) {
+        $lines.Add(@{ text = (Bold "Nautilus " $th.assistant) + (Themed ([string]([char]0x203A) + " ") 'assistant') + (Themed (Format-ApiError $streamState.Error) 'error'); role = "assistant" })
     }
 
     # Empty state: home screen
@@ -866,16 +975,16 @@ function script:Render-Frame {
         $lines.Add(@{ text = (Dim "  Or just start typing, Daddy."); role = "system" })
     }
 
-    # ---- Paint (home + clear-eol; avoid full 2J flicker) ----
+    # Paint (home + clear-eol; avoid full 2J flicker)
     Write-Host "$script:Esc[H" -NoNewline
     Write-At 1 1 $topLine -ClearEol
-    Write-At $borderRowT 1 $borderTop -ClearEol
+    Write-At 2 1 $borderTop -ClearEol
 
     $total = $lines.Count
     $maxStart = [Math]::Max(0, $total - $chatHeight)
     $script:LastMaxStart = $maxStart
     if ($scrollOffset -ge [int]::MaxValue -or $scrollOffset -lt 0) {
-        $start = $maxStart   # pin to bottom
+        $start = $maxStart
     } else {
         $start = [Math]::Min([Math]::Max(0, $scrollOffset), $maxStart)
     }
@@ -889,15 +998,14 @@ function script:Render-Frame {
             $r++
         }
     }
-    # Clear any leftover rows in the chat viewport
     while ($r -le $chatBottom) {
         Write-At $r 1 "" -ClearEol
         $r++
     }
 
-    Write-At $borderRowB 1 $borderBot -ClearEol
+    Write-At ($h - 2) 1 $borderBot -ClearEol
 
-    # status line (rotating flavour when idle; notice overrides)
+    # status line — rotating flavour when idle; notice / thinking override
     $themeName = if ($script:Config -and $script:Config.theme) { $script:Config.theme } else { "Nautilus" }
     if ($notice) {
         $statusText = (Themed $notice 'warn')
@@ -909,19 +1017,16 @@ function script:Render-Frame {
         $flavour = $script:StatusLines[$script:StatusIdx % $script:StatusLines.Count]
         $statusText = (Themed ([string]([char]0x25C9)) 'good') + (Themed " online" 'dim') + (Themed "  |  $themeName" 'dim') + (Themed "  |  $flavour" 'dim')
     }
-    # Truncate status to width
-    if ((VisibleLen $statusText) -gt ($w - 1)) {
-        # keep it simple: rely on ClearEol; oversize ANSI is rare
-    }
     Write-At $statusRow 1 $statusText -ClearEol
 
-    # input line — always clear EOL so shortening the buffer leaves no ghosts
+    # input line — ClearEol so shortening leaves no ghosts
     $prompt = (Themed ([string]([char]0x25B6) + " ") 'accent')
     $buf = if ($null -eq $inputBuffer) { "" } else { $inputBuffer }
     $maxBuf = [Math]::Max(1, $w - 4)
     if ($buf.Length -gt $maxBuf) { $buf = $buf.Substring($buf.Length - $maxBuf) }
     Write-At $inputRow 1 ("$prompt$buf") -ClearEol
 }
+
 
 function script:Show-Startup {
     $h = [Console]::WindowHeight
@@ -952,6 +1057,19 @@ function script:Show-Startup {
 #  TUI MAIN LOOP
 # ===========================================================================
 function script:Run-TUI {
+    $hostCheck = Test-NautilusHost
+    if (-not $hostCheck.Ok) {
+        $esc = $script:Esc
+        Write-Host ""
+        Write-Host "$esc[38;5;203m  Nautilus TUI cannot start in this host.$esc[0m"
+        foreach ($r in $hostCheck.Reasons) {
+            Write-Host "$esc[38;5;221m  - $r$esc[0m"
+        }
+        Write-Host "$esc[38;5;245m  Tip: use Windows Terminal or conhost (powershell.exe / pwsh.exe), not ISE.$esc[0m"
+        Write-Host "$esc[38;5;245m  Non-interactive: nautilus ask `"your question`"$esc[0m"
+        Write-Host ""
+        return
+    }
     $script:Config = Load-Config
     $script:CurrentTheme = $script:Themes[$script:Config.theme]
     if (-not $script:CurrentTheme) {
@@ -972,7 +1090,6 @@ function script:Run-TUI {
     $script:TuiForceExit = $false
     $streamState = $null
 
-    # Ensure alternate screen is restored even on Ctrl+C / terminating errors
     trap {
         try { Exit-TUI } catch { }
         break
@@ -986,21 +1103,16 @@ function script:Run-TUI {
         $notice = ""
         $spinIdx = 0
         $thinkIdx = 0
-        $scrollOffset = [int]::MaxValue   # pin-to-bottom sentinel
+        $scrollOffset = [int]::MaxValue
         $running = $true
-        $idleTicks = 0
 
         while ($running) {
             if ($script:TuiForceExit) { $running = $false; break }
 
-            # Rotate flavour status every few idle frames
-            $idleTicks++
-            if ($idleTicks -ge 1) {
-                # StatusIdx advances when we re-render after key; bump occasionally via key wait is fine
-            }
             Render-Frame -messages $messages -inputBuffer $inputBuffer -scrollOffset $scrollOffset -streamState $null -spinIdx $spinIdx -thinkingMsg "" -notice $notice
             $notice = ""
 
+            # Idle wait with periodic status rotation
             $waitTicks = 0
             $keyReady = $false
             while (-not $keyReady) {
@@ -1009,7 +1121,6 @@ function script:Run-TUI {
                 if ($keyReady) { break }
                 Start-Sleep -Milliseconds 50
                 $waitTicks++
-                # Re-paint every ~1.2s so status flavour lines rotate while idle
                 if ($waitTicks -ge 24) {
                     $waitTicks = 0
                     $script:StatusIdx = ($script:StatusIdx + 1) % [Math]::Max(1, $script:StatusLines.Count)
@@ -1018,7 +1129,13 @@ function script:Run-TUI {
             }
             if ($script:TuiForceExit) { $running = $false; break }
 
-            $key = [Console]::ReadKey($true)
+            try {
+                $key = [Console]::ReadKey($true)
+            } catch {
+                Write-Host "Console input lost. Exiting TUI."
+                $running = $false
+                break
+            }
 
             if ($key.Key -eq "Escape") {
                 $running = $false
@@ -1167,7 +1284,6 @@ function script:Run-TUI {
                 $cancelled = $false
                 while (-not $streamState.Done) {
                     if ($script:TuiForceExit) { $cancelled = $true; break }
-                    # Allow Esc to cancel in-flight request
                     if ([Console]::KeyAvailable) {
                         $ck = [Console]::ReadKey($true)
                         if ($ck.Key -eq "Escape") { $cancelled = $true; break }
@@ -1176,11 +1292,8 @@ function script:Run-TUI {
                     Render-Frame -messages $messages -inputBuffer "" -scrollOffset ([int]::MaxValue) -streamState $streamState -spinIdx $spinIdx -thinkingMsg $thinking -notice ""
                     $spinIdx++
                     $thinkTick++
-                    if ($streamState.Chunks.Count -gt 0) {
-                        $started = $true
-                    } elseif (($thinkTick % 8) -eq 0) {
-                        $thinkIdx++
-                    }
+                    if ($streamState.Chunks.Count -gt 0) { $started = $true }
+                    elseif (($thinkTick % 8) -eq 0) { $thinkIdx++ }
                     Start-Sleep -Milliseconds 70
                 }
 
@@ -1193,9 +1306,7 @@ function script:Run-TUI {
                 }
 
                 $fullStr = Get-StreamFullText $streamState
-
                 if (-not $started -and [string]::IsNullOrEmpty($fullStr) -and $streamState.Error) {
-                    # streaming failed entirely -> non-streaming fallback
                     Dispose-StreamState $streamState
                     $streamState = $null
                     $fbText, $fbErr = Invoke-GeminiFallback -Contents $contents -Model $script:Config.model -Temperature $script:Config.temperature -SystemPrompt $script:SystemPrompt
@@ -1350,8 +1461,7 @@ function script:Invoke-Ask {
         while (-not $streamState.Done) {
             $sp = $script:Spinner[$spin % $script:Spinner.Count]
             $msg = $script:ThinkingLines[$thinkIdx % $script:ThinkingLines.Count]
-            $line = "$esc[38;5;81m$sp $msg$esc[0m"
-            Write-Host "`r$line$esc[K" -NoNewline
+            Write-Host "`r$esc[38;5;81m$sp $msg$esc[0m$esc[K" -NoNewline
             $spin++
             if (($spin % 10) -eq 0) { $thinkIdx++ }
             Start-Sleep -Milliseconds 80
@@ -1389,17 +1499,13 @@ function script:Run-Config {
     Write-Host (Wc "  theme       : $($cfg.theme)" 81)
     Write-Host (Wc "  temperature : $($cfg.temperature)" 81)
     Write-Host (Wc "  maxHistory  : $($cfg.maxHistory)" 81)
-    $searchState = if ($cfg.enableSearch) { "ON" } else { "OFF" }
-    Write-Host (Wc "  search      : $searchState" 81)
-    $proxyShow = if ($cfg.proxyUrl) { $cfg.proxyUrl } else { "(none)" }
-    Write-Host (Wc "  proxy       : $proxyShow" 81)
-    $keyStatus = if ($cfg.apiKey) { "set (cached)" } else { "not set (proxy mode OK)" }
+    $keyStatus = if ($cfg.apiKey) { "set (cached)" } else { "not set" }
     Write-Host (Wc "  api key     : $keyStatus" 81)
     Write-Host (Wc "  config file : $script:ConfigFile" 245)
     Write-Host (Wc "  history     : $script:HistoryFile" 245)
     Write-Host (Wc "  install     : $script:ModuleRoot" 245)
     Write-Host ""
-    Write-Host ((Wc "  Available themes: " 245) + (Wc ($script:Themes.Keys -join ", ") 81))
+    Write-Host (Wc "  Available themes: " 245 + (($script:Themes.Keys -join ", ")))
     Write-Host ""
     if ($action -eq "edit") {
         $newModel = Read-Host (Wc "  Set model (enter to keep [$($cfg.model)])" 240)
@@ -1409,20 +1515,12 @@ function script:Run-Config {
         if ($newTheme -and $script:Themes.Contains($newTheme)) { $cfg.theme = $newTheme }
         $newTemp = Read-Host (Wc "  Set temperature (enter to keep [$($cfg.temperature)])" 240)
         if ($newTemp) { try { $cfg.temperature = [double]$newTemp } catch {} }
-        $searchCur = if ($cfg.enableSearch) { "on" } else { "off" }
-        $newSearch = Read-Host (Wc "  Search grounding on/off (enter to keep [$searchCur])" 240)
-        if ($newSearch) {
-            $ns = $newSearch.Trim().ToLower()
-            if ($ns -in @('on','true','1','yes')) { $cfg.enableSearch = $true }
-            elseif ($ns -in @('off','false','0','no')) { $cfg.enableSearch = $false }
-        }
         Write-Host (Wc "  Set keyUrl (gist raw URL, enter to keep)" 240)
         $newUrl = Read-Host
         if ($newUrl) { $cfg.keyUrl = $newUrl; $cfg.apiKey = "" }
         $pasteKey = Read-Host (Wc "  Or paste a key directly (enter to skip)" 240)
         if ($pasteKey) { $cfg.apiKey = $pasteKey.Trim() }
         Save-Config $cfg
-        $script:Config = $cfg
         Write-Host ""
         Write-Host (Wc "  Saved, Daddy." 117)
         Write-Host ""
@@ -1461,28 +1559,123 @@ function script:Run-Update {
     Write-Host "$esc[38;5;81m  Updating Nautilus from $script:RepoBase ...$esc[0m"
     $InstallRoot = $script:InstallRoot
     $RepoBase = $script:RepoBase
+    # Nested Join-Path for Windows PowerShell 5.1 (no 3-arg Join-Path)
     $moduleDir = Join-Path $InstallRoot "Nautilus"
-    if (-not (Test-Path $moduleDir)) {
+    if (-not (Test-Path -LiteralPath $moduleDir)) {
         New-Item -ItemType Directory -Path $moduleDir -Force | Out-Null
     }
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
     } catch { }
+
+    function script:Get-NautilusRemoteFile {
+        param([string]$Uri, [string]$OutFile)
+        $dir = Split-Path -Parent $OutFile
+        if ($dir -and -not (Test-Path -LiteralPath $dir)) {
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        }
+        $errs = @()
+        $downloaded = $false
+
+        # 1) Prefer native curl.exe / curl (never the Invoke-WebRequest alias)
+        $curlPath = $null
+        foreach ($candidate in @('curl.exe', 'curl', '/usr/bin/curl', '/bin/curl')) {
+            $isPath = ($candidate.IndexOf([char]'/') -ge 0) -or ($candidate.IndexOf([char]'\') -ge 0)
+            if ($isPath) {
+                if (Test-Path -LiteralPath $candidate) { $curlPath = $candidate; break }
+            } else {
+                $c = Get-Command -Name $candidate -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($c) { $curlPath = $c.Source; break }
+            }
+        }
+        if ($curlPath) {
+            try {
+                $p = Start-Process -FilePath $curlPath -ArgumentList @('-fsSL','--retry','2','-o',$OutFile,'--',$Uri) -Wait -PassThru -NoNewWindow
+                if ($p.ExitCode -eq 0 -and (Test-Path -LiteralPath $OutFile) -and ((Get-Item -LiteralPath $OutFile).Length -gt 0)) {
+                    $downloaded = $true
+                } else {
+                    $errs += "curl exit=$($p.ExitCode)"
+                }
+            } catch {
+                $errs += "curl: $($_.Exception.Message)"
+            }
+        } else {
+            $errs += 'curl not found'
+        }
+
+        # 2) HttpClient
+        if (-not $downloaded) {
+            try {
+                Add-Type -AssemblyName System.Net.Http -ErrorAction SilentlyContinue
+                $client = New-Object System.Net.Http.HttpClient
+                $client.Timeout = [TimeSpan]::FromSeconds(60)
+                $resp = $client.GetAsync($Uri).GetAwaiter().GetResult()
+                if ($resp.IsSuccessStatusCode) {
+                    [System.IO.File]::WriteAllBytes($OutFile, $resp.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult())
+                    if ((Test-Path -LiteralPath $OutFile) -and ((Get-Item -LiteralPath $OutFile).Length -gt 0)) {
+                        $downloaded = $true
+                    } else {
+                        $errs += 'HttpClient empty body'
+                    }
+                } else {
+                    $errs += "HttpClient HTTP $([int]$resp.StatusCode)"
+                }
+                $client.Dispose()
+            } catch {
+                $errs += "HttpClient: $($_.Exception.Message)"
+            }
+        }
+
+        # 3) Invoke-WebRequest on Windows
+        if (-not $downloaded -and ($env:OS -eq 'Windows_NT')) {
+            try {
+                Invoke-WebRequest -Uri $Uri -OutFile $OutFile -UseBasicParsing -ErrorAction Stop
+                if ((Test-Path -LiteralPath $OutFile) -and ((Get-Item -LiteralPath $OutFile).Length -gt 0)) {
+                    $downloaded = $true
+                }
+            } catch {
+                $errs += "Invoke-WebRequest: $($_.Exception.Message)"
+            }
+        }
+
+        if (-not $downloaded) {
+            throw ("Failed to download {0} :: {1}" -f $Uri, ($errs -join ' | '))
+        }
+    }
+
+    $okCount = 0
     foreach ($f in @("Nautilus.psd1", "Nautilus.psm1")) {
         $url = "$RepoBase/Nautilus/$f"
         $dest = Join-Path $moduleDir $f
         try {
-            Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing -ErrorAction Stop
-            if (Get-Command Unblock-File -ErrorAction SilentlyContinue) { Unblock-File $dest }
+            Get-NautilusRemoteFile -Uri $url -OutFile $dest
+            if (Get-Command Unblock-File -ErrorAction SilentlyContinue) {
+                Unblock-File -LiteralPath $dest -ErrorAction SilentlyContinue
+            }
             Write-Host "$esc[38;5;245m  refreshed $f$esc[0m"
+            $okCount++
         } catch {
             Write-Host "$esc[38;5;203m  failed to update $f : $($_.Exception.Message)$esc[0m"
         }
     }
-    try {
-        Import-Module (Join-Path $moduleDir "Nautilus.psd1") -Force -ErrorAction Stop
-    } catch { }
-    Write-Host "$esc[38;5;117m  Nautilus is up to date, Daddy.$esc[0m"
+
+    $newVer = $null
+    if ($okCount -gt 0) {
+        try {
+            Import-Module (Join-Path $moduleDir "Nautilus.psd1") -Force -ErrorAction Stop
+            $newVer = $script:NautilusVersion
+        } catch {
+            Write-Host "$esc[38;5;221m  downloaded, but reload failed: $($_.Exception.Message)$esc[0m"
+            Write-Host "$esc[38;5;221m  Open a new PowerShell session to pick up the update.$esc[0m"
+        }
+    }
+    if ($newVer) {
+        Write-Host "$esc[38;5;117m  Nautilus updated to v$newVer, Daddy.$esc[0m"
+    } elseif ($okCount -gt 0) {
+        Write-Host "$esc[38;5;117m  Nautilus files refreshed. Restart PowerShell to load the new version, Daddy.$esc[0m"
+    } else {
+        Write-Host "$esc[38;5;203m  Update failed. Check your network and try again.$esc[0m"
+    }
 }
 
 function script:Run-Uninstall {
@@ -1552,5 +1745,11 @@ function nautilus {
     }
 }
 
-Set-Alias -Name naut -Value nautilus -Scope Global
+try {
+    Set-Alias -Name naut -Value nautilus -Scope Global -ErrorAction Stop
+} catch {
+    try { Set-Alias -Name naut -Value nautilus -Scope Local -ErrorAction SilentlyContinue } catch { }
+}
 Export-ModuleMember -Function nautilus -Alias naut
+
+
