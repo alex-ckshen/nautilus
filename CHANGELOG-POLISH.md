@@ -1,3 +1,9 @@
+# 0.4.0.4
+
+- **Rounded borders back on** by default (`UseRoundedBorders = $true` → `╭─╮│╰─╯`). ASCII `+ - |` remains the fallback when rounded is off.
+- **Scrollbar gutter**: draw width is `WindowWidth - 1` so the Windows console / PowerShell host vertical scrollbar no longer covers the right border (that was the real “missing right edge,” not the rounded glyphs).
+- Centered `/` modal and closed 3-line prompt box unchanged from 0.4.0.3.
+
 # 0.4.0.3
 
 ## Prompt frame

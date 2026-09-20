@@ -2,10 +2,10 @@
     Nautilus - a pure-PowerShell futuristic TUI AI assistant.
     JARVIS-style personality, Gemini-powered, blue sci-fi aesthetic.
     Public command: nautilus  (alias: naut)
-    Version: 0.4.0.3
+    Version: 0.4.0.4
 #>
 
-$script:NautilusVersion = "0.4.0.3"
+$script:NautilusVersion = "0.4.0.4"
 $script:TuiActive = $false
 $script:TuiForceExit = $false
 $script:CancelHandlerRegistered = $false
@@ -13,7 +13,9 @@ $script:LastMaxStart = 0
 $script:StatusIdx = 0
 $script:PendingUpdateVersion = $null
 $script:_UpdateCheckState = $null
-$script:UseRoundedBorders = $false
+$script:UseRoundedBorders = $true
+# Leave 1 col so Windows console / PowerShell host scrollbar does not cover the right border
+$script:ScrollbarGutter = 1
 $script:ToastText = $null
 $script:ToastUntil = $null
 $script:EscArmUntil = $null
@@ -236,6 +238,15 @@ function script:Get-Box {
     return $script:BoxAscii
 }
 
+function script:Get-DrawWidth {
+    # Usable columns for chrome (WindowWidth minus host vertical scrollbar gutter)
+    try { $w = [Console]::WindowWidth } catch { $w = 80 }
+    $g = 0
+    if ($null -ne $script:ScrollbarGutter) { $g = [int]$script:ScrollbarGutter }
+    return [Math]::Max(20, $w - $g)
+}
+
+
 function script:Set-Toast {
     param([string]$Text, [int]$Ms = 2000)
     $script:ToastText = $Text
@@ -348,6 +359,9 @@ function script:Draw-SlashDropdown {
     $items = @($Matches)
     $idx = $script:SlashSelIndex
     $box = Get-Box
+    # Prefer draw width so modal right border clears host scrollbar
+    $drawW = Get-DrawWidth
+    if ($WinW -gt $drawW) { $WinW = $drawW }
     $th = if ($script:CurrentTheme) { $script:CurrentTheme } else { $script:Themes["Nautilus"] }
 
     # Build display rows: muted category headers + selectable command rows
@@ -1837,7 +1851,7 @@ function script:Render-ChromeOnly {
     $th = $script:CurrentTheme
     if (-not $th) { $th = $script:Themes["Nautilus"] }
     $box = Get-Box
-    $w = [Console]::WindowWidth
+    $w = Get-DrawWidth
     $h = [Console]::WindowHeight
     if ($w -lt 30 -or $h -lt 12) { return $false }
 
@@ -1914,7 +1928,7 @@ function script:Render-Frame {
     $th = $script:CurrentTheme
     if (-not $th) { $th = $script:Themes["Nautilus"] }
     $box = Get-Box
-    $w = [Console]::WindowWidth
+    $w = Get-DrawWidth
     $h = [Console]::WindowHeight
     if ($w -lt 30 -or $h -lt 12) {
         Begin-Frame -FullClear
