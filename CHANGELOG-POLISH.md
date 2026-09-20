@@ -1,3 +1,10 @@
+# 0.3.47.0
+
+- **Slash-command autocomplete** (Grok Build completion_dropdown feel): typing `/` in the TUI prompt opens a floating rounded dropdown above the prompt with matching commands (label + short description). Filters as you type; max 6 visible rows with scroll around selection.
+- **Keys**: Up/Down move highlight (do not scroll chat); Tab fills `/{name}` (trailing space for argful: theme, model, search, improve); Enter accepts and runs; Esc dismisses the menu and keeps the buffer (double-Esc quit unchanged once menu is closed).
+- **Mouse** (best-effort): wheel scrolls the slash menu; click selects a row and runs it.
+- `/help`, hint strip, and shortcuts cheatsheet mention `/` opens commands. Spinner ASCII unchanged. Proxy / gist / Gemini wiring untouched. UTF-8 BOM preserved.
+
 # 0.3.46.2 (installer)
 
 - **Root cause:** Windows PS 5.1 `irm` mis-decodes UTF-8 BOM as `ï»¿`, which desyncs the parser and makes later `' | '` / nested quotes look like pipelines.

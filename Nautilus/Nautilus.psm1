@@ -2,10 +2,10 @@
     Nautilus - a pure-PowerShell futuristic TUI AI assistant.
     JARVIS-style personality, Gemini-powered, blue sci-fi aesthetic.
     Public command: nautilus  (alias: naut)
-    Version: 0.3.46.0
+    Version: 0.3.47.0
 #>
 
-$script:NautilusVersion = "0.3.46.0"
+$script:NautilusVersion = "0.3.47.0"
 $script:TuiActive = $false
 $script:TuiForceExit = $false
 $script:CancelHandlerRegistered = $false
@@ -19,6 +19,10 @@ $script:ToastUntil = $null
 $script:EscArmUntil = $null
 $script:MouseEnabled = $false
 $script:MenuHitRows = @()   # Select-Menu click targets: @{ Row = n; Index = i }
+$script:SlashSelIndex = 0
+$script:SlashMenuDismissed = $false
+$script:SlashFilterKey = $null
+$script:SlashHitRows = @()  # slash dropdown click targets: @{ Row; Index; Col; Width }
 
 # ===========================================================================
 #  PRIVATE CONFIG
@@ -216,6 +220,174 @@ function script:Clear-EscArmIfExpired {
     if ($script:EscArmUntil -and [datetime]::UtcNow -ge $script:EscArmUntil) {
         $script:EscArmUntil = $null
     }
+}
+
+
+# ===========================================================================
+#  SLASH-COMMAND AUTOCOMPLETE  (Grok Build completion_dropdown feel)
+# ===========================================================================
+function script:Get-SlashCatalog {
+    return @(
+        @{ Name = 'help';    Desc = 'show commands and keys';     Argful = $false }
+        @{ Name = 'clear';   Desc = 'wipe conversation history';  Argful = $false }
+        @{ Name = 'exit';    Desc = 'close Nautilus';             Argful = $false }
+        @{ Name = 'theme';   Desc = 'switch colour theme';        Argful = $true }
+        @{ Name = 'model';   Desc = 'pick Gemini model';          Argful = $true }
+        @{ Name = 'config';  Desc = 'view configuration';         Argful = $false }
+        @{ Name = 'search';  Desc = 'toggle search grounding';    Argful = $true }
+        @{ Name = 'update';  Desc = 'self-update from Pages';     Argful = $false }
+        @{ Name = 'improve'; Desc = 'improve my own code';         Argful = $true }
+    )
+}
+
+function script:Get-SlashMatches {
+    param([string]$Buffer)
+    if ($null -eq $Buffer) { return @() }
+    # Open when buffer is "/" or "/token" with no space yet
+    if ($Buffer -notmatch '^/\S*$') { return @() }
+    $prefix = if ($Buffer.Length -le 1) { "" } else { $Buffer.Substring(1) }
+    $all = @(Get-SlashCatalog)
+    if ([string]::IsNullOrEmpty($prefix)) { return $all }
+    $out = @()
+    foreach ($item in $all) {
+        if ($item.Name.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $out += $item
+        }
+    }
+    return $out
+}
+
+function script:Get-SlashFill {
+    param($Item)
+    if (-not $Item) { return "/" }
+    if ($Item.Argful) { return "/$($Item.Name) " }
+    return "/$($Item.Name)"
+}
+
+function script:Sync-SlashSelection {
+    param([array]$Matches)
+    if (-not $Matches -or @($Matches).Count -eq 0) {
+        $script:SlashSelIndex = 0
+        $script:SlashFilterKey = $null
+        return
+    }
+    $names = foreach ($m in @($Matches)) { $m.Name }
+    $key = $names -join ","
+    if ($key -ne $script:SlashFilterKey) {
+        $script:SlashFilterKey = $key
+        $script:SlashSelIndex = 0
+    }
+    $n = @($Matches).Count
+    if ($script:SlashSelIndex -ge $n) { $script:SlashSelIndex = $n - 1 }
+    if ($script:SlashSelIndex -lt 0) { $script:SlashSelIndex = 0 }
+}
+
+function script:Test-SlashMenuOpen {
+    param([string]$Buffer)
+    if ($script:SlashMenuDismissed) { return $false }
+    $m = @(Get-SlashMatches -Buffer $Buffer)
+    return ($m.Count -gt 0)
+}
+
+function script:Draw-SlashDropdown {
+    param(
+        [array]$Matches,
+        [int]$PromptTop,
+        [int]$WinW,
+        [int]$WinH
+    )
+    if (-not $Matches -or @($Matches).Count -eq 0) {
+        $script:SlashHitRows = @()
+        return
+    }
+    Sync-SlashSelection -Matches $Matches
+    $items = @($Matches)
+    $idx = $script:SlashSelIndex
+    $box = Get-Box
+    $th = if ($script:CurrentTheme) { $script:CurrentTheme } else { $script:Themes["Nautilus"] }
+
+    $maxVisible = 6
+    $visCount = [Math]::Min($items.Count, $maxVisible)
+    $footerHint = "up/down  tab fill  enter run  esc"
+
+    # Label column width from longest "/name"
+    $labelCol = 0
+    foreach ($it in $items) {
+        $lw = ("/" + $it.Name).Length
+        if ($lw -gt $labelCol) { $labelCol = $lw }
+    }
+    $labelCol = [Math]::Min([Math]::Max($labelCol, 6), 16)
+
+    $contentW = $labelCol + 2 + 22  # prefix + label + gap + desc budget
+    if ($footerHint.Length + 1 -gt $contentW) { $contentW = $footerHint.Length + 1 }
+    $innerW = [Math]::Max(28, [Math]::Min($contentW + 2, $WinW - 6))
+    $boxW = $innerW + 2
+
+    # rows: top, items, footer, bottom
+    $boxHeight = $visCount + 3
+    $startRow = $PromptTop - $boxHeight
+    if ($startRow -lt 3) { $startRow = 3 }
+    $startCol = [Math]::Max(1, [int](($WinW - $boxW) / 2) + 1)
+    if ($startCol + $boxW - 1 -gt $WinW) { $startCol = [Math]::Max(1, $WinW - $boxW) }
+
+    # scroll window centred on selection (Grok scroll_offset)
+    $viewTop = 0
+    if ($items.Count -gt $maxVisible) {
+        $half = [int]($maxVisible / 2)
+        if ($idx -lt $half) {
+            $viewTop = 0
+        } elseif ($idx + $half -ge $items.Count) {
+            $viewTop = $items.Count - $maxVisible
+        } else {
+            $viewTop = $idx - $half
+        }
+        if ($viewTop -lt 0) { $viewTop = 0 }
+    }
+    $viewEnd = [Math]::Min($items.Count, $viewTop + $visCount)
+
+    $hLine = $box.H * $innerW
+    $row = $startRow
+    Write-At $row $startCol (Themed ($box.TL + $hLine + $box.TR) 'border')
+    $row++
+
+    $script:SlashHitRows = @()
+    for ($i = $viewTop; $i -lt $viewEnd; $i++) {
+        $it = $items[$i]
+        $label = "/" + $it.Name
+        if ($label.Length -lt $labelCol) { $label = $label + (" " * ($labelCol - $label.Length)) }
+        $desc = [string]$it.Desc
+        $descBudget = [Math]::Max(4, $innerW - 2 - $labelCol - 2)
+        if ($desc.Length -gt $descBudget) {
+            $desc = $desc.Substring(0, [Math]::Max(1, $descBudget - 3)) + "..."
+        }
+        if ($i -eq $idx) {
+            $body = "> " + $label + "  " + $desc
+            if ($body.Length -gt $innerW) { $body = $body.Substring(0, [Math]::Max(1, $innerW - 3)) + "..." }
+            $pad = $innerW - $body.Length
+            if ($pad -lt 0) { $pad = 0 }
+            $line = (Themed $box.V 'border') + (Themed $body 'accent') + (" " * $pad) + (Themed $box.V 'border')
+        } else {
+            $body = "  " + $label + "  " + $desc
+            if ($body.Length -gt $innerW) { $body = $body.Substring(0, [Math]::Max(1, $innerW - 3)) + "..." }
+            $pad = $innerW - $body.Length
+            if ($pad -lt 0) { $pad = 0 }
+            $line = (Themed $box.V 'border') + (Themed $body 'dim') + (" " * $pad) + (Themed $box.V 'border')
+        }
+        Write-At $row $startCol $line
+        $script:SlashHitRows += @{ Row = $row; Index = $i; Col = $startCol; Width = $boxW }
+        $row++
+    }
+
+    $footPad = $innerW - 1 - $footerHint.Length
+    if ($footPad -lt 0) { $footPad = 0 }
+    $footShown = $footerHint
+    if ($footShown.Length -gt ($innerW - 1)) {
+        $footShown = $footShown.Substring(0, [Math]::Max(1, $innerW - 4)) + "..."
+        $footPad = $innerW - 1 - $footShown.Length
+    }
+    Write-At $row $startCol ((Themed $box.V 'border') + (Dim (" " + $footShown)) + (" " * $footPad) + (Themed $box.V 'border'))
+    $row++
+    Write-At $row $startCol (Themed ($box.BL + $hLine + $box.BR) 'border')
 }
 
 # ===========================================================================
@@ -1176,6 +1348,8 @@ function script:Get-ShortcutRows {
         @{ Keys = 'Up/Down';   Desc = 'Scroll chat history' }
         @{ Keys = 'PgUp/PgDn'; Desc = 'Scroll chat by page' }
         @{ Keys = 'Home/End';  Desc = 'Jump to top / bottom' }
+        @{ Keys = '/';         Desc = 'Open slash-command autocomplete' }
+        @{ Keys = 'Tab';       Desc = 'Fill selected slash command' }
         @{ Keys = '/help';     Desc = 'Slash help (same bindings listed)' }
         @{ Keys = '/theme';    Desc = 'Theme picker (arrows / click / Esc)' }
         @{ Keys = '/model';    Desc = 'Model picker' }
@@ -1464,7 +1638,7 @@ function script:Render-Frame {
         $lines.Add(@{ text = (Themed "  /clear" 'accent') + (Dim "  - wipe conversation history"); role = "system" })
         $lines.Add(@{ text = (Themed "  /exit" 'accent') + (Dim "   - close Nautilus  (or press Esc twice)"); role = "system" })
         $lines.Add(@{ text = ""; role = "gap" })
-        $lines.Add(@{ text = (Dim "  Or just start typing, Daddy.  Press ? for shortcuts."); role = "system" })
+        $lines.Add(@{ text = (Dim "  Type / for commands, or just start chatting.  Press ? for shortcuts."); role = "system" })
     }
 
     Write-Host "$script:Esc[H" -NoNewline
@@ -1571,6 +1745,18 @@ function script:Render-Frame {
     }
     $botLine = (Themed ($box.BL + ($box.H * $leftFill)) 'border') + $captionColored + (Themed (($box.H * $rightFill) + $box.BR) 'border')
     Write-At $promptBot 1 $botLine -ClearEol
+
+    # Slash autocomplete dropdown floats just above the prompt
+    if (-not $script:SlashMenuDismissed) {
+        $slashMatches = @(Get-SlashMatches -Buffer $inputBuffer)
+        if ($slashMatches.Count -gt 0) {
+            Draw-SlashDropdown -Matches $slashMatches -PromptTop $promptTop -WinW $w -WinH $h
+        } else {
+            $script:SlashHitRows = @()
+        }
+    } else {
+        $script:SlashHitRows = @()
+    }
 }
 
 
@@ -1656,6 +1842,10 @@ function script:Run-TUI {
         $script:EscArmUntil = $null
         $script:ToastText = $null
         $script:ToastUntil = $null
+        $script:SlashSelIndex = 0
+        $script:SlashMenuDismissed = $false
+        $script:SlashFilterKey = $null
+        $script:SlashHitRows = @()
 
         while ($running) {
             if ($script:TuiForceExit) { $running = $false; break }
@@ -1695,8 +1885,18 @@ function script:Run-TUI {
                 break
             }
 
-            # Mouse wheel scrolls chat (best-effort)
+            # Mouse wheel: slash menu first, else chat scroll (best-effort)
             if ($ev.Kind -eq 'MouseWheel') {
+                if (Test-SlashMenuOpen -Buffer $inputBuffer) {
+                    $sm = @(Get-SlashMatches -Buffer $inputBuffer)
+                    Sync-SlashSelection -Matches $sm
+                    if ($ev.Delta -gt 0) {
+                        $script:SlashSelIndex = ($script:SlashSelIndex - 1 + $sm.Count) % $sm.Count
+                    } else {
+                        $script:SlashSelIndex = ($script:SlashSelIndex + 1) % $sm.Count
+                    }
+                    continue
+                }
                 if ($ev.Delta -gt 0) {
                     if ($scrollOffset -eq [int]::MaxValue) {
                         $max = if ($script:LastMaxStart -ge 0) { $script:LastMaxStart } else { 0 }
@@ -1714,8 +1914,33 @@ function script:Run-TUI {
                 continue
             }
             if ($ev.Kind -eq 'MouseClick') {
-                # Region stub: chat click reserved for future focus/selection
-                continue
+                if (Test-SlashMenuOpen -Buffer $inputBuffer) {
+                    $picked = $null
+                    foreach ($hit in @($script:SlashHitRows)) {
+                        if ($ev.Row -eq $hit.Row -and $ev.Col -ge $hit.Col -and $ev.Col -lt ($hit.Col + $hit.Width)) {
+                            $picked = $hit.Index
+                            break
+                        }
+                    }
+                    if ($null -ne $picked) {
+                        $sm = @(Get-SlashMatches -Buffer $inputBuffer)
+                        if ($picked -ge 0 -and $picked -lt $sm.Count) {
+                            $script:SlashSelIndex = $picked
+                            $inputBuffer = Get-SlashFill -Item $sm[$picked]
+                            $script:SlashMenuDismissed = $true
+                            # Accept + run: synthesize Enter (PS 5.1-safe New-Object)
+                            $key = New-Object System.ConsoleKeyInfo ([char]13, [ConsoleKey]::Enter, $false, $false, $false)
+                            $ev = @{ Kind = 'Key'; Key = $key }
+                        } else {
+                            continue
+                        }
+                    } else {
+                        continue
+                    }
+                } else {
+                    # Region stub: chat click reserved for future focus/selection
+                    continue
+                }
             }
             if ($ev.Kind -ne 'Key' -or -not $ev.Key) { continue }
             $key = $ev.Key
@@ -1742,6 +1967,12 @@ function script:Run-TUI {
             }
 
             if ($key.Key -eq "Escape") {
+                if (Test-SlashMenuOpen -Buffer $inputBuffer) {
+                    # Grok-like: dismiss dropdown, keep typed buffer
+                    $script:SlashMenuDismissed = $true
+                    $script:EscArmUntil = $null
+                    continue
+                }
                 Clear-EscArmIfExpired
                 if ($script:EscArmUntil) {
                     $running = $false
@@ -1749,8 +1980,23 @@ function script:Run-TUI {
                     $script:EscArmUntil = [datetime]::UtcNow.AddSeconds(2)
                     Set-Toast -Text "press esc again to quit" -Ms 2000
                 }
+            } elseif ($key.Key -eq "Tab") {
+                $script:EscArmUntil = $null
+                if (Test-SlashMenuOpen -Buffer $inputBuffer) {
+                    $sm = @(Get-SlashMatches -Buffer $inputBuffer)
+                    Sync-SlashSelection -Matches $sm
+                    $inputBuffer = Get-SlashFill -Item $sm[$script:SlashSelIndex]
+                    $script:SlashMenuDismissed = $true
+                }
+                continue
             } elseif ($key.Key -eq "Enter") {
                 $script:EscArmUntil = $null
+                if (Test-SlashMenuOpen -Buffer $inputBuffer) {
+                    $sm = @(Get-SlashMatches -Buffer $inputBuffer)
+                    Sync-SlashSelection -Matches $sm
+                    $inputBuffer = Get-SlashFill -Item $sm[$script:SlashSelIndex]
+                    $script:SlashMenuDismissed = $true
+                }
                 $text = $inputBuffer.Trim()
                 $inputBuffer = ""
                 if ([string]::IsNullOrWhiteSpace($text)) { continue }
@@ -1954,19 +2200,30 @@ function script:Run-TUI {
                 $script:EscArmUntil = $null
                 if ($inputBuffer.Length -gt 0) {
                     $inputBuffer = $inputBuffer.Substring(0, $inputBuffer.Length - 1)
+                    $script:SlashMenuDismissed = $false
                 }
             } elseif ($key.Key -eq "UpArrow") {
                 $script:EscArmUntil = $null
-                # Leave pin-to-bottom and move up one line
-                if ($scrollOffset -eq [int]::MaxValue) {
-                    $max = if ($script:LastMaxStart -ge 0) { $script:LastMaxStart } else { 0 }
-                    $scrollOffset = [Math]::Max(0, $max - 1)
+                if (Test-SlashMenuOpen -Buffer $inputBuffer) {
+                    $sm = @(Get-SlashMatches -Buffer $inputBuffer)
+                    Sync-SlashSelection -Matches $sm
+                    $script:SlashSelIndex = ($script:SlashSelIndex - 1 + $sm.Count) % $sm.Count
                 } else {
-                    $scrollOffset = [Math]::Max(0, $scrollOffset - 1)
+                    # Leave pin-to-bottom and move up one line
+                    if ($scrollOffset -eq [int]::MaxValue) {
+                        $max = if ($script:LastMaxStart -ge 0) { $script:LastMaxStart } else { 0 }
+                        $scrollOffset = [Math]::Max(0, $max - 1)
+                    } else {
+                        $scrollOffset = [Math]::Max(0, $scrollOffset - 1)
+                    }
                 }
             } elseif ($key.Key -eq "DownArrow") {
                 $script:EscArmUntil = $null
-                if ($scrollOffset -eq [int]::MaxValue) {
+                if (Test-SlashMenuOpen -Buffer $inputBuffer) {
+                    $sm = @(Get-SlashMatches -Buffer $inputBuffer)
+                    Sync-SlashSelection -Matches $sm
+                    $script:SlashSelIndex = ($script:SlashSelIndex + 1) % $sm.Count
+                } elseif ($scrollOffset -eq [int]::MaxValue) {
                     # already pinned
                 } else {
                     $max = if ($script:LastMaxStart -ge 0) { $script:LastMaxStart } else { 0 }
@@ -2008,6 +2265,7 @@ function script:Run-TUI {
                 $ch = $key.KeyChar
                 if (-not [char]::IsControl($ch) -and $ch -ne [char]0) {
                     $inputBuffer += $ch
+                    $script:SlashMenuDismissed = $false
                 }
             }
         }
@@ -2028,7 +2286,7 @@ function script:Run-TUI {
 # ===========================================================================
 function script:Get-HelpText {
     return @"
-Nautilus commands (type in the prompt):
+Nautilus commands (type / in the prompt for autocomplete):
   /help      Show this help
   /clear     Clear conversation history
   /theme     List themes  |  /theme <name>  to switch
@@ -2040,14 +2298,16 @@ Nautilus commands (type in the prompt):
   /exit      Close Nautilus  (or double-Esc)
 
 Keys:
-  Enter      Send message
-  Esc        Cancel in-flight request; press again within ~2s to quit
+  Enter      Send message (or run highlighted slash command)
+  Esc        Dismiss slash menu; cancel stream; press again within ~2s to quit
+  Tab        Fill slash command from autocomplete menu
+  /          Open slash-command autocomplete dropdown
   ?          Open shortcuts cheatsheet (when prompt is empty)
   Ctrl+.     Open / close shortcuts cheatsheet
   Ctrl+U     Apply pending in-TUI update (when tip is shown)
-  Up/Down    Scroll chat  |  PgUp/PgDn page  |  Home/End jump
-  Wheel      Scroll chat or menus (best-effort mouse)
-  Click      Select a menu row (best-effort mouse)
+  Up/Down    Slash menu or scroll chat; PgUp/PgDn page; Home/End jump
+  Wheel      Scroll slash menu, chat, or pickers (best-effort mouse)
+  Click      Select a slash/menu row (best-effort mouse)
 
 Shell commands:
   nautilus                 Launch the interactive TUI
