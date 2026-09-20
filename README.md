@@ -85,7 +85,7 @@ nautilus theme Cyber
 - Local config at `~/.nautilus/config.json`, history at `~/.nautilus/history.json`.
 - Virtual Terminal processing is enabled in-process on Windows PowerShell 5.1.
 - Thinking spinner (Grok-Build inspired polish); connection flavour lives in the title bar / startup only.
-- ASCII box chrome (Big5-safe), grouped centered slash modal, command palette, prompt history, multiline input, smoother frame paint, retuned dark palettes (0.4.0.1-0.4.2.2).
+- ASCII box chrome (Big5-safe), grouped centered slash modal, command palette, prompt history, multiline input, smoother frame paint, retuned dark palettes (0.4.0.1-0.4.2.4).
 
 ## Repository layout
 

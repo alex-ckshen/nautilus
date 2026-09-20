@@ -1,3 +1,9 @@
+# 0.4.2.4
+
+- **Fix: slash / menu arrow highlight not updating live** — with VT input enabled, ↑↓ arrive as `ESC [ A/B`. The mouse-only CSI drain ate those bytes and treated them as Escape, so the selector never moved until something else painted. Now `Try-ParseEscSequence` maps CSI arrows (and Home/End/PgUp/PgDn) to real keys; mouse SGR still works.
+- Idle chrome refresh no longer redraws without the slash modal (keeps highlight in sync).
+- Slash root ↑↓ handlers `continue` immediately after moving the selection.
+
 # 0.4.2.3
 
 - **Self-update UX:** after a successful update, the shell **exits** so you cannot accidentally relaunch the old in-memory module in the same window.
@@ -17,6 +23,7 @@
 - **Aliases in the menu:** show primary name only (`/exit`, not `/exit|/quit`). Aliases still match when typing.
 
 # 0.4.2.0
+
 
 ## Copy code fences
 - **`/copycode`** (`/cc`) + **Ctrl+Shift+C** (Ctrl+Alt+C fallback): copy markdown fenced code from recent assistant replies.

@@ -2,10 +2,10 @@
     Nautilus - a pure-PowerShell futuristic TUI AI assistant.
     JARVIS-style personality, Gemini-powered, blue sci-fi aesthetic.
     Public command: nautilus  (alias: naut)
-    Version: 0.4.2.3
+    Version: 0.4.2.4
 #>
 
-$script:NautilusVersion = "0.4.2.3"
+$script:NautilusVersion = "0.4.2.4"
 $script:TuiActive = $false
 $script:TuiForceExit = $false
 $script:CancelHandlerRegistered = $false
@@ -1663,12 +1663,23 @@ function script:Disable-Mouse {
     $script:MouseEnabled = $false
 }
 
-function script:Try-ParseSgrMouse {
-    # Drain pending KeyChars after ESC and parse CSI < btn ; col ; row M/m
-    # Returns hashtable Kind/Button/Col/Row/Pressed or $null
-    # Call ONLY when KeyAvailable after ESC — never on bare Escape (avoids eating keys).
+function script:New-SynthKeyInfo {
+    param(
+        [ConsoleKey]$Key,
+        [bool]$Shift = $false,
+        [bool]$Alt = $false,
+        [bool]$Control = $false
+    )
+    return New-Object System.ConsoleKeyInfo([char]0, $Key, $Shift, $Alt, $Control)
+}
+
+function script:Try-ParseEscSequence {
+    # After ESC was read: drain CSI. Returns Mouse* hashtable, @{Kind='Key'; Key=...}, or $null.
+    # Critical: with ENABLE_VIRTUAL_TERMINAL_INPUT, arrows arrive as ESC [ A/B/C/D.
+    # Older mouse-only parser ate those bytes and returned $null -> Read-TuiEvent
+    # fell through as Escape, so slash/menu selection never moved live.
     $buf = New-Object System.Text.StringBuilder
-    $deadline = [datetime]::UtcNow.AddMilliseconds(80)
+    $deadline = [datetime]::UtcNow.AddMilliseconds(100)
     try {
         while ([datetime]::UtcNow -lt $deadline) {
             $avail = $false
@@ -1682,12 +1693,16 @@ function script:Try-ParseSgrMouse {
             } catch { break }
             $ch = $k.KeyChar
             if ($ch -eq [char]0) {
-                # Non-char virtual key mid-sequence — not mouse; stop (key already consumed)
+                # Virtual key mid-sequence — treat as that key if arrow-like
+                if ($k.Key -eq 'UpArrow' -or $k.Key -eq 'DownArrow' -or $k.Key -eq 'LeftArrow' -or $k.Key -eq 'RightArrow' -or $k.Key -eq 'Home' -or $k.Key -eq 'End' -or $k.Key -eq 'PageUp' -or $k.Key -eq 'PageDown') {
+                    return @{ Kind = 'Key'; Key = $k }
+                }
                 return $null
             }
             [void]$buf.Append($ch)
             $s = $buf.ToString()
-            # SGR: <b;x;yM or <b;x;ym   (CSI already consumed as ESC - next is '[')
+
+            # SGR mouse: [<b;x;yM or m
             if ($s -match '^\[<(\d+);(\d+);(\d+)([Mm])') {
                 $btn = [int]$Matches[1]
                 $col = [int]$Matches[2]
@@ -1695,7 +1710,6 @@ function script:Try-ParseSgrMouse {
                 $pressed = ($Matches[4] -ceq 'M')
                 $kind = 'MouseClick'
                 $delta = 0
-                # wheel: 64 up, 65 down (bitfield in SGR)
                 if (($btn -band 64) -ne 0) {
                     $kind = 'MouseWheel'
                     if (($btn -band 1) -ne 0) { $delta = -1 } else { $delta = 1 }
@@ -1709,11 +1723,64 @@ function script:Try-ParseSgrMouse {
                     Delta = $delta
                 }
             }
-            # give up if clearly not mouse (too long / wrong prefix)
+
+            # SS3 application-cursor: OA OB OC OD
+            if ($s -match '^O([ABCD])$') {
+                $map = @{ A = 'UpArrow'; B = 'DownArrow'; C = 'RightArrow'; D = 'LeftArrow' }
+                $ck = [System.Enum]::Parse([System.ConsoleKey], [string]$map[$Matches[1]])
+                return @{ Kind = 'Key'; Key = (New-SynthKeyInfo -Key $ck) }
+            }
+
+            # CSI arrows / home / end / pgup / pgdn (optional modifiers 1;N)
+            # e.g. [A  [B  [1;5A (Ctrl+Up)  [H  [F  [5~  [6~
+            if ($s -match '^\[(?:(\d+)(?:;(\d+))?([A-Z~])|([A-Z~]))$') {
+                $final = if ($Matches[4]) { $Matches[4] } else { $Matches[3] }
+                $mod = 0
+                if ($Matches[2]) { $mod = [int]$Matches[2] }
+                elseif ($Matches[1] -and $final -match '^[A-Z]$') { }
+                $shift = (($mod -band 1) -ne 0) -or ($mod -eq 2)
+                $alt = (($mod -band 2) -ne 0) -or ($mod -eq 3) -or ($mod -eq 4)
+                $ctrl = (($mod -band 4) -ne 0) -or ($mod -ge 5)
+                # xterm modifier encoding: 1=none, 2=shift, 3=alt, 4=alt+shift, 5=ctrl, ...
+                if ($mod -ge 2) {
+                    $m = $mod - 1
+                    $shift = ($m -band 1) -ne 0
+                    $alt = ($m -band 2) -ne 0
+                    $ctrl = ($m -band 4) -ne 0
+                }
+                $ckName = $null
+                switch ($final) {
+                    'A' { $ckName = 'UpArrow' }
+                    'B' { $ckName = 'DownArrow' }
+                    'C' { $ckName = 'RightArrow' }
+                    'D' { $ckName = 'LeftArrow' }
+                    'H' { $ckName = 'Home' }
+                    'F' { $ckName = 'End' }
+                    '~' {
+                        $code = if ($Matches[1]) { [int]$Matches[1] } else { 0 }
+                        switch ($code) {
+                            1 { $ckName = 'Home' }
+                            4 { $ckName = 'End' }
+                            5 { $ckName = 'PageUp' }
+                            6 { $ckName = 'PageDown' }
+                        }
+                    }
+                }
+                if ($ckName) {
+                    $ck = [System.Enum]::Parse([System.ConsoleKey], [string]$ckName)
+                    return @{ Kind = 'Key'; Key = (New-SynthKeyInfo -Key $ck -Shift:$shift -Alt:$alt -Control:$ctrl) }
+                }
+            }
+
             if ($s.Length -gt 32) { return $null }
             if ($s.Length -ge 1 -and $s[0] -ne '[' -and $s[0] -ne 'O') { return $null }
-            # After '[' must be '<' for SGR mouse (or digit/letter for CSI keys)
-            if ($s.Length -ge 2 -and $s[0] -eq '[' -and $s[1] -ne '<') { return $null }
+            # Incomplete CSI mouse still collecting
+            if ($s.Length -ge 2 -and $s[0] -eq '[' -and $s[1] -eq '<') { continue }
+            # Incomplete CSI key still collecting digits/semicolons
+            if ($s -match '^\[(\d|;)*$') { continue }
+            if ($s -eq '[') { continue }
+            if ($s -eq 'O') { continue }
+            return $null
         }
     } catch { return $null }
     return $null
@@ -1738,19 +1805,22 @@ function script:Read-TuiEvent {
                 try { $more = [Console]::KeyAvailable } catch { $more = $false }
                 if ($more) {
                     try {
-                        $mouse = Try-ParseSgrMouse
-                        if ($mouse) {
-                            if ($mouse.Kind -eq 'MouseWheel') {
-                                return @{ Kind = 'MouseWheel'; Delta = $mouse.Delta; Col = $mouse.Col; Row = $mouse.Row; Key = $null }
+                        $seq = Try-ParseEscSequence
+                        if ($seq) {
+                            if ($seq.Kind -eq 'MouseWheel') {
+                                return @{ Kind = 'MouseWheel'; Delta = $seq.Delta; Col = $seq.Col; Row = $seq.Row; Key = $null }
                             }
-                            if ($mouse.Kind -eq 'MouseClick' -and $mouse.Pressed) {
-                                return @{ Kind = 'MouseClick'; Col = $mouse.Col; Row = $mouse.Row; Button = $mouse.Button; Key = $null }
+                            if ($seq.Kind -eq 'MouseClick' -and $seq.Pressed) {
+                                return @{ Kind = 'MouseClick'; Col = $seq.Col; Row = $seq.Row; Button = $seq.Button; Key = $null }
+                            }
+                            if ($seq.Kind -eq 'Key' -and $seq.Key) {
+                                return @{ Kind = 'Key'; Key = $seq.Key }
                             }
                             # release / other - ignore
                             continue
                         }
                     } catch {
-                        # mouse parse must never kill the host
+                        # esc-sequence parse must never kill the host
                         continue
                     }
                 }
@@ -2934,9 +3004,18 @@ function script:Run-TUI {
                 if ($waitTicks -ge 20) {  # ~1 Hz chrome refresh (toast expiry / pending update)
                     $waitTicks = 0
                     Poll-UpdateCheck
-                    $okChrome = Render-ChromeOnly -inputBuffer $inputBuffer -streamState $null -spinIdx $spinIdx -thinkingMsg "" -notice ""
-                    if (-not $okChrome) {
+                    # Slash modal lives in the middle of the frame — ChromeOnly would leave a stale highlight
+                    $slashUi = $false
+                    try {
+                        $slashUi = [bool]$script:SlashExpand -or ((-not $script:SlashMenuDismissed) -and ($null -ne $inputBuffer) -and ($inputBuffer -match '^/\S*$'))
+                    } catch { $slashUi = $false }
+                    if ($slashUi) {
                         Render-Frame -messages $messages -inputBuffer $inputBuffer -scrollOffset $scrollOffset -streamState $null -spinIdx $spinIdx -thinkingMsg "" -notice ""
+                    } else {
+                        $okChrome = Render-ChromeOnly -inputBuffer $inputBuffer -streamState $null -spinIdx $spinIdx -thinkingMsg "" -notice ""
+                        if (-not $okChrome) {
+                            Render-Frame -messages $messages -inputBuffer $inputBuffer -scrollOffset $scrollOffset -streamState $null -spinIdx $spinIdx -thinkingMsg "" -notice ""
+                        }
                     }
                 }
             }
@@ -3449,6 +3528,7 @@ function script:Run-TUI {
                     Sync-SlashSelection -Matches $sm
                     $script:SlashSelIndex = ($script:SlashSelIndex - 1 + $sm.Count) % $sm.Count
                     $script:NeedsFullPaint = $true
+                    continue
                 } elseif ($script:InPromptHistory -or ([string]::IsNullOrEmpty($inputBuffer) -and $script:PromptHistory.Count -gt 0)) {
                     if ($script:PromptHistory.Count -gt 0) {
                         if (-not $script:InPromptHistory) {
@@ -3486,6 +3566,7 @@ function script:Run-TUI {
                     Sync-SlashSelection -Matches $sm
                     $script:SlashSelIndex = ($script:SlashSelIndex + 1) % $sm.Count
                     $script:NeedsFullPaint = $true
+                    continue
                 } elseif ($script:InPromptHistory) {
                     if ($script:PromptHistoryIndex -lt ($script:PromptHistory.Count - 1)) {
                         $script:PromptHistoryIndex++
