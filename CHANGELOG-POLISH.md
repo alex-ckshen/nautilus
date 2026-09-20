@@ -1,3 +1,27 @@
+# 0.4.0.1
+
+## Smooth rendering
+- No full clear (`2J`) every frame — only on Enter-TUI and window resize.
+- Each frame batched into one `StringBuilder` + single `[Console]::Out.Write`, wrapped in synchronized update `ESC[?2026h` … `ESC[?2026l`.
+- Idle status rotation (~1 Hz) uses `Render-ChromeOnly` (hint + prompt chrome) when chat/buffer unchanged; `$script:NeedsFullPaint` / resize dirty flags force full paint.
+- Cursor stays hidden for the whole TUI session.
+
+## Wave 1
+- `/new` — clear history + notice (slash catalog + help).
+- `/copy` — last assistant reply via `Set-Clipboard` / `clip.exe`, else `~/.nautilus/last-copy.txt`.
+- `/export [path]` — markdown transcript under `~/.nautilus/exports/` (timestamp default).
+- Prompt history — last ~50 user sends; Up/Down when buffer empty or in history mode (slash menu still owns arrows).
+- Multiline — Alt+Enter / Ctrl+J insert newline; trailing `\` then Enter continues line; prompt shows `[...]` + multiline caption.
+- Ctrl+K command palette — Select-Menu over slash catalog (fill argful / run the rest). Ctrl+U update unchanged.
+
+## Palette dial
+- Semantic roles: `text` / `muted` / `faint` / `accent` / `border` / `good` / `warn` / `error` / `user` / `assistant`.
+- Accent reserved for selection, focus, and `>` prompt; chat body uses `text`; soft gray borders; brighter readable body vs faint captions.
+- Retuned **Nautilus** + **Midnight** (primary); light pass on Cyber / Abyss.
+- Selected slash/menu rows: accent + bold; unselected: muted.
+
+Proxy / gist / Gemini wiring untouched. UTF-8 BOM on `.psm1`/`.psd1`; `install.ps1` remains no-BOM ASCII.
+
 # 0.3.47.0
 
 - **Slash-command autocomplete** (Grok Build completion_dropdown feel): typing `/` in the TUI prompt opens a floating rounded dropdown above the prompt with matching commands (label + short description). Filters as you type; max 6 visible rows with scroll around selection.

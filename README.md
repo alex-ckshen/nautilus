@@ -52,13 +52,14 @@ nautilus help            # full command list
 
 - Type a message and press **Enter** to chat with Nautilus (streaming responses).
 - Compact **rounded prompt box** (Grok-style) with model/theme caption and a contextual shortcut hint strip.
-- Type **`/`** for slash-command autocomplete (dropdown above the prompt). Commands: `/help`, `/clear`, `/config`, `/theme`, `/model`, `/search on|off`, `/improve`, `/update`, `/exit`.
-- When a newer version is available, a subtle tip appears — press **Ctrl+U** (or `/update`) to apply it.
+- Type **`/`** for slash-command autocomplete (dropdown above the prompt). Commands: `/help`, `/new`, `/clear`, `/copy`, `/export`, `/config`, `/theme`, `/model`, `/search on|off`, `/improve`, `/update`, `/exit`.
+- **Ctrl+K** opens the command palette; **Ctrl+U** applies a pending update tip.
 - **Esc** cancels an in-flight request; press **Esc again within ~2s** to quit (toast confirms).
 - **?** (empty prompt) or **Ctrl+.** opens the shortcuts cheatsheet modal.
-- **Up/Down** or **PgUp/PgDn** to scroll history; **Home/End** jump; mouse **wheel** scrolls when the terminal supports it.
+- **Up/Down** on an empty prompt cycles sent-prompt history; with `/` open they move the slash menu; otherwise they scroll chat (**PgUp/PgDn** / **Home/End** / wheel still scroll).
+- **Multiline**: Alt+Enter or Ctrl+J inserts a newline; or end a line with `\` then Enter (PS 5.1-friendly). Enter alone still sends.
 - Menu pickers (`/theme`, `/model`) support arrows, Enter, Esc, and best-effort **click**.
-- Backspace and printable keys edit the input line.
+- Smoother TUI paint in **0.4.0.1** (batched ANSI, no per-frame full clear, idle chrome-only status rotation).
 
 ## Themes
 
@@ -79,7 +80,7 @@ nautilus theme Cyber
 - Local config at `~/.nautilus/config.json`, history at `~/.nautilus/history.json`.
 - Virtual Terminal processing is enabled in-process on Windows PowerShell 5.1.
 - Thinking spinner + rotating status lines (Grok-Build inspired polish).
-- Rounded box chrome, slash autocomplete dropdown, shortcut hints / cheatsheet, double-Esc quit, best-effort VT mouse (0.3.47+).
+- Rounded box chrome, slash autocomplete, command palette, prompt history, multiline input, smoother frame paint, retuned dark palettes (0.4.0.1).
 
 ## Repository layout
 

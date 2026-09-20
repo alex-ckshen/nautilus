@@ -3,7 +3,7 @@
 Source: xai-org/grok-build docs (`user-guide/03-keyboard-shortcuts.md`, `04-slash-commands.md`) + pager actions/slash registry.
 Nautilus stays pure PowerShell; we port *behaviour*, not Rust crates.
 
-## Already in Nautilus (or landing in 0.3.47)
+## Already in Nautilus (through 0.4.0.1)
 
 | Area | Status |
 |------|--------|
@@ -15,18 +15,16 @@ Nautilus stays pure PowerShell; we port *behaviour*, not Rust crates.
 | `/help` `/clear` `/exit` `/theme` `/model` `/config` `/search` `/update` `/improve` | yes |
 | Themes, streaming chat, self-update | yes |
 
-## Wave 1 — effortless core (next)
+## Wave 1 — effortless core (0.4.0.1)
 
-Port these first; highest daily-use payoff, feasible in PS TUI:
-
-1. **`/new`** alias of clear + soft reset (Grok `/new`)
-2. **`/copy`** — copy last assistant reply (clip.exe / pbcopy / xclip; file fallback)
-3. **`/export`** — write transcript to `~/.nautilus/exports/`
-4. **Prompt history** — Up/Down when buffer empty or history mode (Grok prompt history)
-5. **Multiline input** — Shift+Enter or `/multiline` toggle; Enter sends
-6. **Cancel turn** — Ctrl+C clearly cancels stream (already Esc; align messaging)
-7. **Command palette** — Ctrl+K or Ctrl+P listing actions (subset of Grok palette)
-8. **`/model` picker polish** — already exists; ensure dropdown `/mo` → fill works
+1. **`/new`** alias of clear + soft reset (Grok `/new`) — **done**
+2. **`/copy`** — copy last assistant reply (Set-Clipboard / clip.exe; `~/.nautilus/last-copy.txt` fallback) — **done**
+3. **`/export`** — write transcript to `~/.nautilus/exports/` — **done**
+4. **Prompt history** — Up/Down when buffer empty or history mode (Grok prompt history) — **done**
+5. **Multiline input** — Alt+Enter / Ctrl+J / trailing `\`+Enter; Enter sends — **done**
+6. **Cancel turn** — Esc cancels stream; Ctrl+C force-exits TUI (existing) — **done** (messaging via hint strip)
+7. **Command palette** — Ctrl+K listing slash actions — **done**
+8. **`/model` picker polish** — dropdown `/mo` → fill works (0.3.47+) — **done**
 
 ## Wave 2 — session comfort
 
