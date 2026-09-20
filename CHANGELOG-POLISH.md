@@ -1,3 +1,16 @@
+# 0.4.2.2
+
+- **Copy-code shortcut (P0 for Alex on WT):** Windows Terminal steals **Ctrl+Shift+C** for host Copy, so the app never sees it. Primary chords are now **F6** and **Ctrl+Alt+C** (plus **Ctrl+Shift+Y**). Ctrl+Shift+C kept as best-effort. **`/cc` / `/copycode` unchanged** (confirmed working).
+- **Crash hardening:** no `[ref]$null` default on `Exit-SlashExpand` (PS 5.1 throws); safe dict key checks (OrderedDictionary has no `ContainsKey`); clipboard/mouse/copycode wrapped so they never kill the host; `Exit-TUI` always leaves alt-screen + disables mouse.
+- **Scroll:** mouse-wheel scroll-down now sets `NeedsFullPaint`; VT input enabled on stdin for SGR mouse; bare Esc no longer enters mouse parser (was eating keys); Up on empty prompt scrolls when history is empty.
+- **Slash L/R collapse:** Left/Esc restores saved buffer (usually `/`) so full catalog returns (not stuck on `/theme`). Menu shows primary name only (`/exit`, not `/exit|/quit`).
+
+# 0.4.2.1
+
+
+- **Slash L/R collapse:** Left/Esc from an expanded submenu restores the prior buffer (usually `/`) and force-clears so the **full** command list shows again (was stuck filtered to `/theme` etc.).
+- **Aliases in the menu:** show primary name only (`/exit`, not `/exit|/quit`). Aliases still match when typing.
+
 # 0.4.2.0
 
 ## Copy code fences

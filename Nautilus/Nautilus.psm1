@@ -2,10 +2,10 @@
     Nautilus - a pure-PowerShell futuristic TUI AI assistant.
     JARVIS-style personality, Gemini-powered, blue sci-fi aesthetic.
     Public command: nautilus  (alias: naut)
-    Version: 0.4.2.0
+    Version: 0.4.2.2
 #>
 
-$script:NautilusVersion = "0.4.2.0"
+$script:NautilusVersion = "0.4.2.2"
 $script:TuiActive = $false
 $script:TuiForceExit = $false
 $script:CancelHandlerRegistered = $false
@@ -101,7 +101,7 @@ You exist to make Daddy's life smoother, sharper, and more enjoyable.
 TUI / copyable code (important):
 - You run inside a pure-PowerShell terminal UI that parses markdown fenced code blocks.
 - When you share copyable code, put it in a fenced block with a language tag (e.g. ```powershell ... ```).
-- Prefer one clear fence per snippet so Daddy can copy it with Ctrl+Shift+C or /copycode.
+- Prefer one clear fence per snippet so Daddy can copy it with F6, Ctrl+Alt+C, or /copycode (/cc).
 - Keep prose outside fences. Do not wrap an entire reply in a single fence.
 "@
 
@@ -215,10 +215,25 @@ function script:Dim  {
     if (-not $th) { $th = $script:Themes["Nautilus"] }
     $code = 242
     if ($th) {
-        if ($th.ContainsKey('faint') -and $th.faint) { $code = [int]$th.faint }
+        if ((Test-DictHasKey $th 'faint') -and $th.faint) { $code = [int]$th.faint }
         elseif ($th.dim) { $code = [int]$th.dim }
     }
     return "$script:Esc[38;5;${code}m$t$script:Esc[0m"
+}
+
+
+function script:Test-DictHasKey {
+    # PS 5.1-safe: Hashtable has ContainsKey; OrderedDictionary only has Contains.
+    param($Object, [string]$Key)
+    if ($null -eq $Object -or [string]::IsNullOrEmpty($Key)) { return $false }
+    try {
+        if ($Object -is [System.Collections.IDictionary]) {
+            return [bool]$Object.Contains($Key)
+        }
+    } catch { }
+    try {
+        return [bool]($Object.PSObject.Properties.Name -contains $Key)
+    } catch { return $false }
 }
 
 # ===========================================================================
@@ -398,15 +413,20 @@ function script:Get-SlashExpandOptions {
 function script:Test-SlashExpandable {
     param($Item)
     if (-not $Item) { return $false }
-    if ($Item.ContainsKey('Expandable') -and $Item.Expandable) { return $true }
-    $opts = Get-SlashExpandOptions -Name ([string]$Item.Name)
-    return ($null -ne $opts)
+    try {
+        if ((Test-DictHasKey $Item 'Expandable') -and $Item.Expandable) { return $true }
+    } catch { }
+    try {
+        $opts = Get-SlashExpandOptions -Name ([string]$Item.Name)
+        return ($null -ne $opts)
+    } catch { return $false }
 }
 
 function script:Enter-SlashExpand {
     param(
         [string]$ParentName,
-        [int]$ParentSelIndex = 0
+        [int]$ParentSelIndex = 0,
+        [string]$SavedBuffer = "/"
     )
     $pack = Get-SlashExpandOptions -Name $ParentName
     if (-not $pack) { return $false }
@@ -417,15 +437,40 @@ function script:Enter-SlashExpand {
         SelIndex       = [int]$pack.DefaultIndex
         Title          = [string]$pack.Title
         ParentSelIndex = $ParentSelIndex
+        SavedBuffer    = $SavedBuffer
     }
     return $true
 }
 
 function script:Exit-SlashExpand {
-    if ($script:SlashExpand -and $null -ne $script:SlashExpand.ParentSelIndex) {
-        $script:SlashSelIndex = [int]$script:SlashExpand.ParentSelIndex
-    }
+    # Untyped BufferRef: PS 5.1 throws on param([ref]$x = $null) when called with no arg.
+    param($BufferRef = $null)
+    $saved = $null
+    try {
+        if ($script:SlashExpand) {
+            if ($null -ne $script:SlashExpand.ParentSelIndex) {
+                $script:SlashSelIndex = [int]$script:SlashExpand.ParentSelIndex
+            }
+            if (Test-DictHasKey $script:SlashExpand 'SavedBuffer') {
+                $saved = [string]$script:SlashExpand.SavedBuffer
+            }
+        }
+    } catch { }
     $script:SlashExpand = $null
+    # Restore pre-expand buffer (usually "/") so the full slash catalog redraws,
+    # not a one-row filter like "/theme" left behind by Right-arrow expand.
+    try {
+        if ($null -ne $BufferRef -and $BufferRef -is [ref]) {
+            if ($null -ne $saved -and $saved.Length -ge 0) {
+                $BufferRef.Value = $saved
+            } else {
+                $BufferRef.Value = "/"
+            }
+        }
+    } catch { }
+    $script:SlashMenuDismissed = $false
+    $script:NeedsFullClear = $true
+    $script:NeedsFullPaint = $true
 }
 
 function script:Clear-SlashExpand {
@@ -621,7 +666,7 @@ function script:Draw-SlashDropdown {
     foreach ($it in $items) {
         $alias = [string]$it.Alias
         $lab = "/" + $it.Name
-        if (-not [string]::IsNullOrWhiteSpace($alias)) { $lab = $lab + "|/" + $alias }
+        # Alias matches in filter only; UI shows primary name (not /exit|/quit)
         $lw = $lab.Length
         if ($lw -gt $labelCol) { $labelCol = $lw }
     }
@@ -705,9 +750,7 @@ function script:Draw-SlashDropdown {
         }
         $i = [int]$dr.Index
         $it = $dr.Item
-        $alias = [string]$it.Alias
         $label = "/" + $it.Name
-        if (-not [string]::IsNullOrWhiteSpace($alias)) { $label = $label + "|/" + $alias }
         if (Test-SlashExpandable -Item $it) { $label = $label + " >" }
         if ($label.Length -lt $labelCol) { $label = $label + (" " * ($labelCol - $label.Length)) }
         $desc = [string]$it.Desc
@@ -924,9 +967,9 @@ function script:Themed {
     if (-not $th) { $th = $script:Themes["Nautilus"] }
     if (-not $th) { return $t }
     $code = switch ($role) {
-        'text'      { if ($th.ContainsKey('text')) { $th.text } else { 252 } }
-        'muted'     { if ($th.ContainsKey('muted')) { $th.muted } else { $th.system } }
-        'faint'     { if ($th.ContainsKey('faint')) { $th.faint } else { $th.dim } }
+        'text'      { if (Test-DictHasKey $th 'text') { $th.text } else { 252 } }
+        'muted'     { if (Test-DictHasKey $th 'muted') { $th.muted } else { $th.system } }
+        'faint'     { if (Test-DictHasKey $th 'faint') { $th.faint } else { $th.dim } }
         'accent'    { $th.accent }
         'deep'      { $th.deep }
         'bright'    { $th.bright }
@@ -939,7 +982,7 @@ function script:Themed {
         'warn'      { $th.warn }
         'error'     { $th.error }
         'titlebar'  { $th.titlebar }
-        default     { if ($th.ContainsKey('text')) { $th.text } else { 252 } }
+        default     { if (Test-DictHasKey $th 'text') { $th.text } else { 252 } }
     }
     return "$script:Esc[38;5;${code}m$t$script:Esc[0m"
 }
@@ -1347,11 +1390,20 @@ function script:Enable-VT {
                 }
             }
             if ($type) {
-                $h = $type::GetStdHandle(-11)
-                if ($h -ne [IntPtr]::Zero -and $h.ToInt64() -ne -1) {
+                # STDOUT: ENABLE_VIRTUAL_TERMINAL_PROCESSING (0x4)
+                $hOut = $type::GetStdHandle(-11)
+                if ($hOut -ne [IntPtr]::Zero -and $hOut.ToInt64() -ne -1) {
                     $mode = [uint32]0
-                    if ($type::GetConsoleMode($h, [ref]$mode)) {
-                        [void]$type::SetConsoleMode($h, $mode -bor 0x0004)
+                    if ($type::GetConsoleMode($hOut, [ref]$mode)) {
+                        [void]$type::SetConsoleMode($hOut, $mode -bor 0x0004)
+                    }
+                }
+                # STDIN: ENABLE_VIRTUAL_TERMINAL_INPUT (0x200) so SGR mouse / CSI reach ReadKey
+                $hIn = $type::GetStdHandle(-10)
+                if ($hIn -ne [IntPtr]::Zero -and $hIn.ToInt64() -ne -1) {
+                    $modeIn = [uint32]0
+                    if ($type::GetConsoleMode($hIn, [ref]$modeIn)) {
+                        [void]$type::SetConsoleMode($hIn, $modeIn -bor 0x0200)
                     }
                 }
             }
@@ -1614,46 +1666,56 @@ function script:Disable-Mouse {
 function script:Try-ParseSgrMouse {
     # Drain pending KeyChars after ESC and parse CSI < btn ; col ; row M/m
     # Returns hashtable Kind/Button/Col/Row/Pressed or $null
+    # Call ONLY when KeyAvailable after ESC — never on bare Escape (avoids eating keys).
     $buf = New-Object System.Text.StringBuilder
-    $deadline = [datetime]::UtcNow.AddMilliseconds(30)
-    while ([datetime]::UtcNow -lt $deadline) {
-        $avail = $false
-        try { $avail = [Console]::KeyAvailable } catch { $avail = $false }
-        if (-not $avail) {
-            Start-Sleep -Milliseconds 2
-            continue
-        }
-        try {
-            $k = [Console]::ReadKey($true)
-        } catch { break }
-        [void]$buf.Append($k.KeyChar)
-        $s = $buf.ToString()
-        # SGR: <b;x;yM or <b;x;ym   (CSI already consumed as ESC - next is '[')
-        if ($s -match '^\[<(\d+);(\d+);(\d+)([Mm])') {
-            $btn = [int]$Matches[1]
-            $col = [int]$Matches[2]
-            $row = [int]$Matches[3]
-            $pressed = ($Matches[4] -ceq 'M')
-            $kind = 'MouseClick'
-            $delta = 0
-            # wheel: 64 up, 65 down (bitfield in SGR)
-            if (($btn -band 64) -ne 0) {
-                $kind = 'MouseWheel'
-                if (($btn -band 1) -ne 0) { $delta = -1 } else { $delta = 1 }
+    $deadline = [datetime]::UtcNow.AddMilliseconds(80)
+    try {
+        while ([datetime]::UtcNow -lt $deadline) {
+            $avail = $false
+            try { $avail = [Console]::KeyAvailable } catch { $avail = $false }
+            if (-not $avail) {
+                Start-Sleep -Milliseconds 2
+                continue
             }
-            return @{
-                Kind = $kind
-                Button = $btn
-                Col = $col
-                Row = $row
-                Pressed = $pressed
-                Delta = $delta
+            try {
+                $k = [Console]::ReadKey($true)
+            } catch { break }
+            $ch = $k.KeyChar
+            if ($ch -eq [char]0) {
+                # Non-char virtual key mid-sequence — not mouse; stop (key already consumed)
+                return $null
             }
+            [void]$buf.Append($ch)
+            $s = $buf.ToString()
+            # SGR: <b;x;yM or <b;x;ym   (CSI already consumed as ESC - next is '[')
+            if ($s -match '^\[<(\d+);(\d+);(\d+)([Mm])') {
+                $btn = [int]$Matches[1]
+                $col = [int]$Matches[2]
+                $row = [int]$Matches[3]
+                $pressed = ($Matches[4] -ceq 'M')
+                $kind = 'MouseClick'
+                $delta = 0
+                # wheel: 64 up, 65 down (bitfield in SGR)
+                if (($btn -band 64) -ne 0) {
+                    $kind = 'MouseWheel'
+                    if (($btn -band 1) -ne 0) { $delta = -1 } else { $delta = 1 }
+                }
+                return @{
+                    Kind = $kind
+                    Button = $btn
+                    Col = $col
+                    Row = $row
+                    Pressed = $pressed
+                    Delta = $delta
+                }
+            }
+            # give up if clearly not mouse (too long / wrong prefix)
+            if ($s.Length -gt 32) { return $null }
+            if ($s.Length -ge 1 -and $s[0] -ne '[' -and $s[0] -ne 'O') { return $null }
+            # After '[' must be '<' for SGR mouse (or digit/letter for CSI keys)
+            if ($s.Length -ge 2 -and $s[0] -eq '[' -and $s[1] -ne '<') { return $null }
         }
-        # give up if clearly not mouse (too long / wrong prefix)
-        if ($s.Length -gt 24) { return $null }
-        if ($s.Length -ge 1 -and $s[0] -ne '[' -and $s[0] -ne 'O') { return $null }
-    }
+    } catch { return $null }
     return $null
 }
 
@@ -1669,20 +1731,26 @@ function script:Read-TuiEvent {
                 $key = [Console]::ReadKey($true)
             } catch { return $null }
 
-            # Escape may start an SGR mouse sequence when mouse is enabled
+            # Escape may start an SGR mouse sequence — only peek when bytes follow
+            # (never call Try-ParseSgrMouse on bare Esc: that ate keys / delayed quit).
             if ($key.Key -eq 'Escape' -or $key.KeyChar -eq [char]27) {
                 $more = $false
                 try { $more = [Console]::KeyAvailable } catch { $more = $false }
-                if ($more -or $script:MouseEnabled) {
-                    $mouse = Try-ParseSgrMouse
-                    if ($mouse) {
-                        if ($mouse.Kind -eq 'MouseWheel') {
-                            return @{ Kind = 'MouseWheel'; Delta = $mouse.Delta; Col = $mouse.Col; Row = $mouse.Row; Key = $null }
+                if ($more) {
+                    try {
+                        $mouse = Try-ParseSgrMouse
+                        if ($mouse) {
+                            if ($mouse.Kind -eq 'MouseWheel') {
+                                return @{ Kind = 'MouseWheel'; Delta = $mouse.Delta; Col = $mouse.Col; Row = $mouse.Row; Key = $null }
+                            }
+                            if ($mouse.Kind -eq 'MouseClick' -and $mouse.Pressed) {
+                                return @{ Kind = 'MouseClick'; Col = $mouse.Col; Row = $mouse.Row; Button = $mouse.Button; Key = $null }
+                            }
+                            # release / other - ignore
+                            continue
                         }
-                        if ($mouse.Kind -eq 'MouseClick' -and $mouse.Pressed) {
-                            return @{ Kind = 'MouseClick'; Col = $mouse.Col; Row = $mouse.Row; Button = $mouse.Button; Key = $null }
-                        }
-                        # release / other - ignore
+                    } catch {
+                        # mouse parse must never kill the host
                         continue
                     }
                 }
@@ -1716,8 +1784,10 @@ function script:Get-ShortcutRows {
         @{ Keys = '/new';      Desc = 'New chat (clear history)' }
         @{ Keys = '/copy';     Desc = 'Copy last assistant reply' }
         @{ Keys = '/copycode'; Desc = 'Copy code fence (/cc)' }
-        @{ Keys = 'Ctrl+Shift+C'; Desc = 'Copy code block from reply' }
-        @{ Keys = 'Ctrl+Alt+C'; Desc = 'Copy code block (fallback)' }
+        @{ Keys = 'F6'; Desc = 'Copy code block from reply' }
+        @{ Keys = 'Ctrl+Alt+C'; Desc = 'Copy code block (alt chord)' }
+        @{ Keys = 'Ctrl+Shift+Y'; Desc = 'Copy code block (alt chord)' }
+        @{ Keys = 'Ctrl+Shift+C'; Desc = 'Copy code (often stolen by Windows Terminal)' }
         @{ Keys = 'Right';     Desc = 'Expand theme/model/search in / menu' }
         @{ Keys = 'Left';      Desc = 'Collapse expanded / submenu' }
         @{ Keys = '/export';   Desc = 'Export transcript to file' }
@@ -1847,12 +1917,16 @@ function script:Enter-TUI {
     }
 }
 function script:Exit-TUI {
+    # Always restore console — never let clipboard/mouse/paint failures leave alt-screen stuck.
     try { Disable-Mouse } catch { }
     try {
-        Write-Host "$script:Esc[?1049l" -NoNewline  # leave alternate screen
-        Write-Host "$script:Esc[?25h" -NoNewline    # show cursor
-        Write-Host "$script:Esc[0m" -NoNewline      # reset attrs
-    } catch { }
+        $esc = [char]27
+        [Console]::Write("$esc[?1000l$esc[?1006l$esc[?1049l$esc[?25h$esc[0m")
+    } catch {
+        try {
+            Write-Host "$script:Esc[?1000l$script:Esc[?1006l$script:Esc[?1049l$script:Esc[?25h$script:Esc[0m" -NoNewline
+        } catch { }
+    }
     try { [Console]::CursorVisible = $true } catch { }
     $script:TuiActive = $false
 }
@@ -1922,6 +1996,14 @@ function script:Clear-Screen {
 function script:Write-At {
     param([int]$row, [int]$col, [string]$text, [switch]$ClearEol)
     if ($null -eq $text) { $text = "" }
+    if ($row -lt 1) { $row = 1 }
+    if ($col -lt 1) { $col = 1 }
+    try {
+        $maxH = [Console]::WindowHeight
+        $maxW = [Console]::WindowWidth
+        if ($maxH -gt 0 -and $row -gt $maxH) { return }
+        if ($maxW -gt 0 -and $col -gt $maxW) { return }
+    } catch { }
     $suffix = if ($ClearEol) { "$script:Esc[K" } else { "" }
     $chunk = "$script:Esc[$($row);$($col)H$text$suffix"
     if ($null -ne $script:FrameSb) {
@@ -1949,13 +2031,20 @@ function script:Add-PromptHistory {
 }
 
 function script:Get-CodeFences {
-    param([string]$Text)
+    param($Text)
     $results = New-Object System.Collections.Generic.List[object]
+    if ($null -eq $Text) { return @() }
+    # Coerce arrays / PSCustomObject snippets to a single string
+    if ($Text -is [System.Array]) {
+        $Text = [string]::Join("`n", @($Text | ForEach-Object { [string]$_ }))
+    } else {
+        $Text = [string]$Text
+    }
     if ([string]::IsNullOrEmpty($Text)) { return @() }
 
     # PS 5.1-safe line scan for ``` / ~~~ fences (optional lang tag).
     $nl = [char]10
-    $norm = ([string]$Text) -replace "`r`n", "`n" -replace "`r", "`n"
+    $norm = $Text -replace "`r`n", "`n" -replace "`r", "`n"
     $lines = $norm.Split(@($nl), [System.StringSplitOptions]::None)
     $i = 0
     $idx = 0
@@ -2037,18 +2126,38 @@ function script:Copy-TextToClipboard {
     param([string]$Text)
     if ($null -eq $Text) { $Text = "" }
     $copied = $false
+    # Prefer clip.exe first on Windows — Set-Clipboard often needs STA and can throw
+    # from the MTA console host (caught, but noisy / flaky on PS 5.1).
     try {
-        if (Get-Command Set-Clipboard -ErrorAction SilentlyContinue) {
-            Set-Clipboard -Value $Text -ErrorAction Stop
-            $copied = $true
-        }
-    } catch { }
+        $isWin = ($env:OS -eq 'Windows_NT') -or ($PSVersionTable.Platform -eq 'Win32NT') -or $IsWindows
+        if (-not $isWin -and $PSVersionTable.PSVersion.Major -lt 6) { $isWin = $true }
+    } catch { $isWin = $true }
+    if ($isWin) {
+        try {
+            $clipCmd = Get-Command clip.exe -ErrorAction SilentlyContinue
+            if ($clipCmd) {
+                $Text | & clip.exe 2>$null
+                if ($LASTEXITCODE -eq 0 -or $null -eq $LASTEXITCODE) { $copied = $true }
+            }
+        } catch { }
+    }
     if (-not $copied) {
         try {
-            $clip = Get-Command clip.exe -ErrorAction SilentlyContinue
-            if ($clip) {
-                $Text | & clip.exe
-                if ($LASTEXITCODE -eq 0 -or $null -eq $LASTEXITCODE) { $copied = $true }
+            if (Get-Command Set-Clipboard -ErrorAction SilentlyContinue) {
+                Set-Clipboard -Value $Text -ErrorAction Stop
+                $copied = $true
+            }
+        } catch { }
+    }
+    if (-not $copied -and -not $isWin) {
+        try {
+            # Linux/macOS best-effort
+            if (Get-Command xclip -ErrorAction SilentlyContinue) {
+                $Text | & xclip -selection clipboard 2>$null
+                $copied = $true
+            } elseif (Get-Command pbcopy -ErrorAction SilentlyContinue) {
+                $Text | & pbcopy 2>$null
+                $copied = $true
             }
         } catch { }
     }
@@ -2084,36 +2193,47 @@ function script:Copy-LastAssistant {
 
 function script:Copy-CodeBlock {
     param([array]$Messages)
-    $blocks = @(Get-CopyableCodeBlocks -Messages $Messages)
-    if ($blocks.Count -eq 0) {
-        return @{ Ok = $false; Notice = "no code blocks in recent replies" }
-    }
-    $chosen = $null
-    if ($blocks.Count -eq 1) {
-        $chosen = $blocks[0]
-    } else {
-        $labels = New-Object System.Collections.Generic.List[string]
-        foreach ($b in $blocks) {
-            $langLabel = if (-not [string]::IsNullOrWhiteSpace([string]$b.Lang)) { [string]$b.Lang } else { "code" }
-            [void]$labels.Add(("{0}  {1}  {2}" -f $b.Index, $langLabel, $b.Preview))
+    try {
+        $blocks = @(Get-CopyableCodeBlocks -Messages $Messages)
+        if ($blocks.Count -eq 0) {
+            return @{ Ok = $false; Notice = "no code blocks in recent replies" }
         }
-        $picked = Select-Menu -Title "Copy code block" -Options @($labels.ToArray()) -DefaultIndex 0
+        $chosen = $null
+        if ($blocks.Count -eq 1) {
+            $chosen = $blocks[0]
+        } else {
+            $labels = New-Object System.Collections.Generic.List[string]
+            foreach ($b in $blocks) {
+                $langLabel = if (-not [string]::IsNullOrWhiteSpace([string]$b.Lang)) { [string]$b.Lang } else { "code" }
+                [void]$labels.Add(("{0}  {1}  {2}" -f $b.Index, $langLabel, $b.Preview))
+            }
+            $picked = $null
+            try {
+                $picked = Select-Menu -Title "Copy code block" -Options @($labels.ToArray()) -DefaultIndex 0
+            } catch {
+                $picked = $null
+            }
+            $script:NeedsFullClear = $true
+            $script:NeedsFullPaint = $true
+            if (-not $picked) { return @{ Ok = $false; Notice = "copy cancelled" } }
+            $pickIdx = [array]::IndexOf(@($labels.ToArray()), [string]$picked)
+            if ($pickIdx -lt 0) { return @{ Ok = $false; Notice = "copy cancelled" } }
+            $chosen = $blocks[$pickIdx]
+        }
+        $cr = Copy-TextToClipboard -Text ([string]$chosen.Code)
+        if (-not $cr.Ok) { return $cr }
+        $n = ([string]$chosen.Code).Length
+        $langBit = ""
+        if (-not [string]::IsNullOrWhiteSpace([string]$chosen.Lang)) {
+            $langBit = ([string]$chosen.Lang).ToLowerInvariant() + " "
+        }
+        $suffix = if ($cr.Via -eq "file") { " (file fallback)" } else { "" }
+        return @{ Ok = $true; Notice = ("copied {0}code block ({1} chars){2}" -f $langBit, $n, $suffix) }
+    } catch {
         $script:NeedsFullClear = $true
         $script:NeedsFullPaint = $true
-        if (-not $picked) { return @{ Ok = $false; Notice = "copy cancelled" } }
-        $pickIdx = [array]::IndexOf(@($labels.ToArray()), [string]$picked)
-        if ($pickIdx -lt 0) { return @{ Ok = $false; Notice = "copy cancelled" } }
-        $chosen = $blocks[$pickIdx]
+        return @{ Ok = $false; Notice = "copycode failed: $($_.Exception.Message)" }
     }
-    $cr = Copy-TextToClipboard -Text ([string]$chosen.Code)
-    if (-not $cr.Ok) { return $cr }
-    $n = ([string]$chosen.Code).Length
-    $langBit = ""
-    if (-not [string]::IsNullOrWhiteSpace([string]$chosen.Lang)) {
-        $langBit = ([string]$chosen.Lang).ToLowerInvariant() + " "
-    }
-    $suffix = if ($cr.Via -eq "file") { " (file fallback)" } else { "" }
-    return @{ Ok = $true; Notice = ("copied {0}code block ({1} chars){2}" -f $langBit, $n, $suffix) }
 }
 
 function script:Confirm-DestructiveSlash {
@@ -2438,7 +2558,7 @@ function script:Render-ChromeOnly {
     } else {
         $hintText = (Dim " enter") + (Themed " send" 'muted') + (Dim "  /") + (Themed " commands" 'muted') + (Dim "  ?") + (Themed " keys" 'muted') + (Dim "  esc") + (Themed " quit" 'muted')
         if ($script:HintCopyCode -and [string]::IsNullOrEmpty($buf)) {
-            $hintText = $hintText + (Dim "  Ctrl+Shift+C") + (Themed " copy code" 'muted')
+            $hintText = $hintText + (Dim "  F6") + (Themed " copy code" 'muted')
         }
     }
     Write-At $hintRow 1 "" -ClearEol
@@ -2649,7 +2769,7 @@ function script:Render-Frame {
         }
         $hintText = (Dim " enter") + (Themed " send" 'muted') + (Dim "  /") + (Themed " commands" 'muted') + (Dim "  ?") + (Themed " keys" 'muted') + (Dim "  esc") + (Themed " quit" 'muted')
         if ($script:HintCopyCode) {
-            $hintText = $hintText + (Dim "  Ctrl+Shift+C") + (Themed " copy code" 'muted')
+            $hintText = $hintText + (Dim "  F6") + (Themed " copy code" 'muted')
         }
     }
     Write-At $hintRow 1 "" -ClearEol
@@ -2755,7 +2875,8 @@ function script:Run-TUI {
 
     trap {
         try { Exit-TUI } catch { }
-        break
+        $script:TuiForceExit = $true
+        continue
     }
 
     $applyUpdate = $false
@@ -2860,21 +2981,23 @@ function script:Run-TUI {
                     $script:NeedsFullPaint = $true
                     continue
                 }
-                if ($ev.Delta -gt 0) {
-                    $script:NeedsFullPaint = $true
-                    if ($scrollOffset -eq [int]::MaxValue) {
-                        $max = if ($script:LastMaxStart -ge 0) { $script:LastMaxStart } else { 0 }
-                        $scrollOffset = [Math]::Max(0, $max - 3)
+                $script:NeedsFullPaint = $true
+                try {
+                    if ($ev.Delta -gt 0) {
+                        if ($scrollOffset -eq [int]::MaxValue) {
+                            $max = if ($script:LastMaxStart -ge 0) { $script:LastMaxStart } else { 0 }
+                            $scrollOffset = [Math]::Max(0, $max - 3)
+                        } else {
+                            $scrollOffset = [Math]::Max(0, $scrollOffset - 3)
+                        }
                     } else {
-                        $scrollOffset = [Math]::Max(0, $scrollOffset - 3)
+                        if ($scrollOffset -ne [int]::MaxValue) {
+                            $max = if ($script:LastMaxStart -ge 0) { $script:LastMaxStart } else { 0 }
+                            $next = $scrollOffset + 3
+                            if ($next -ge $max) { $scrollOffset = [int]::MaxValue } else { $scrollOffset = $next }
+                        }
                     }
-                } else {
-                    if ($scrollOffset -ne [int]::MaxValue) {
-                        $max = if ($script:LastMaxStart -ge 0) { $script:LastMaxStart } else { 0 }
-                        $next = $scrollOffset + 3
-                        if ($next -ge $max) { $scrollOffset = [int]::MaxValue } else { $scrollOffset = $next }
-                    }
-                }
+                } catch { }
                 continue
             }
             if ($ev.Kind -eq 'MouseClick') {
@@ -2909,9 +3032,15 @@ function script:Run-TUI {
                             $script:SlashSelIndex = $picked
                             $sel = $sm[$picked]
                             if (Test-SlashExpandable -Item $sel) {
+                                $__savedSlashBuf = $inputBuffer
+
+                                if ([string]::IsNullOrWhiteSpace($__savedSlashBuf) -or $__savedSlashBuf -eq ("/" + $sel.Name)) { $__savedSlashBuf = "/" }
+
                                 $inputBuffer = "/" + $sel.Name
+
                                 $script:SlashMenuDismissed = $false
-                                $null = Enter-SlashExpand -ParentName $sel.Name -ParentSelIndex $picked
+
+                                $null = Enter-SlashExpand -ParentName $sel.Name -ParentSelIndex $picked -SavedBuffer $__savedSlashBuf
                                 $script:NeedsFullPaint = $true
                                 continue
                             }
@@ -2953,9 +3082,9 @@ function script:Run-TUI {
                 Clear-SlashExpand
                 if (Test-SlashExpandable -Item $picked) {
                     # Drill into inline options (no separate Select-Menu)
-                    $inputBuffer = "/" + $picked.Name
                     $script:SlashMenuDismissed = $false
-                    $null = Enter-SlashExpand -ParentName $picked.Name -ParentSelIndex 0
+                    $null = Enter-SlashExpand -ParentName $picked.Name -ParentSelIndex 0 -SavedBuffer "/"
+                    $inputBuffer = "/" + $picked.Name
                     $script:NeedsFullPaint = $true
                     continue
                 }
@@ -2970,7 +3099,7 @@ function script:Run-TUI {
                 if ($sr.Expand) {
                     $inputBuffer = "/" + $sr.Expand
                     $script:SlashMenuDismissed = $false
-                    $null = Enter-SlashExpand -ParentName $sr.Expand -ParentSelIndex 0
+                    $null = Enter-SlashExpand -ParentName $sr.Expand -ParentSelIndex 0 -SavedBuffer "/"
                     $script:NeedsFullPaint = $true
                     continue
                 }
@@ -2983,15 +3112,29 @@ function script:Run-TUI {
                 continue
             }
 
-            # Ctrl+Shift+C / Ctrl+Alt+C — copy fenced code (do not steal Ctrl+C cancel)
+            # Copy fenced code — keyboard chords (slash /cc already works).
+            # Windows Terminal steals Ctrl+Shift+C for its own "Copy" and never
+            # delivers it to the app, so primary in-app chords are:
+            #   F6            (always reaches the app)
+            #   Ctrl+Alt+C    (WT does not bind this by default)
+            # Ctrl+Shift+C / Ctrl+Shift+Y kept as best-effort if the host passes them.
             $hasCtrl = (($key.Modifiers -band [ConsoleModifiers]::Control) -ne 0)
             $hasShift = (($key.Modifiers -band [ConsoleModifiers]::Shift) -ne 0)
             $hasAltMod = (($key.Modifiers -band [ConsoleModifiers]::Alt) -ne 0)
-            $isCopyCodeKey = ($key.Key -eq "C") -and $hasCtrl -and ($hasShift -or $hasAltMod)
+            $isF6Copy = ($key.Key -eq "F6")
+            $isCtrlAltC = ($key.Key -eq "C") -and $hasCtrl -and $hasAltMod
+            $isCtrlShiftC = ($key.Key -eq "C") -and $hasCtrl -and $hasShift
+            $isCtrlShiftY = ($key.Key -eq "Y") -and $hasCtrl -and $hasShift
+            $isCopyCodeKey = $isF6Copy -or $isCtrlAltC -or $isCtrlShiftC -or $isCtrlShiftY
             if ($isCopyCodeKey) {
                 $script:EscArmUntil = $null
-                $cr = Copy-CodeBlock -Messages $messages
-                $notice = $cr.Notice
+                try {
+                    $cr = Copy-CodeBlock -Messages $messages
+                    $notice = if ($cr -and $cr.Notice) { $cr.Notice } else { "copycode done" }
+                } catch {
+                    $notice = "copycode failed: $($_.Exception.Message)"
+                }
+                $script:NeedsFullClear = $true
                 $script:NeedsFullPaint = $true
                 continue
             }
@@ -3015,7 +3158,7 @@ function script:Run-TUI {
 
             if ($key.Key -eq "Escape") {
                 if ($script:SlashExpand) {
-                    Exit-SlashExpand
+                    Exit-SlashExpand -BufferRef ([ref]$inputBuffer)
                     $script:EscArmUntil = $null
                     $script:NeedsFullPaint = $true
                     continue
@@ -3063,9 +3206,15 @@ function script:Run-TUI {
                         Sync-SlashSelection -Matches $sm
                         $sel = $sm[$script:SlashSelIndex]
                         if (Test-SlashExpandable -Item $sel) {
+                            $__savedSlashBuf = $inputBuffer
+
+                            if ([string]::IsNullOrWhiteSpace($__savedSlashBuf) -or $__savedSlashBuf -eq ("/" + $sel.Name)) { $__savedSlashBuf = "/" }
+
                             $inputBuffer = "/" + $sel.Name
+
                             $script:SlashMenuDismissed = $false
-                            $null = Enter-SlashExpand -ParentName $sel.Name -ParentSelIndex $script:SlashSelIndex
+
+                            $null = Enter-SlashExpand -ParentName $sel.Name -ParentSelIndex $script:SlashSelIndex -SavedBuffer $__savedSlashBuf
                         } else {
                             $inputBuffer = Get-SlashFill -Item $sel
                             $script:SlashMenuDismissed = $true
@@ -3092,7 +3241,7 @@ function script:Run-TUI {
                     $ix = [int]$script:SlashExpand.SelIndex
                     $parent = [string]$script:SlashExpand.Parent
                     if ($opts.Count -eq 0 -or $ix -lt 0 -or $ix -ge $opts.Count) {
-                        Exit-SlashExpand
+                        Exit-SlashExpand -BufferRef ([ref]$inputBuffer)
                         $script:NeedsFullPaint = $true
                         continue
                     }
@@ -3123,9 +3272,15 @@ function script:Run-TUI {
                     Sync-SlashSelection -Matches $sm
                     $sel = $sm[$script:SlashSelIndex]
                     if (Test-SlashExpandable -Item $sel) {
+                        $__savedSlashBuf = $inputBuffer
+
+                        if ([string]::IsNullOrWhiteSpace($__savedSlashBuf) -or $__savedSlashBuf -eq ("/" + $sel.Name)) { $__savedSlashBuf = "/" }
+
                         $inputBuffer = "/" + $sel.Name
+
                         $script:SlashMenuDismissed = $false
-                        $null = Enter-SlashExpand -ParentName $sel.Name -ParentSelIndex $script:SlashSelIndex
+
+                        $null = Enter-SlashExpand -ParentName $sel.Name -ParentSelIndex $script:SlashSelIndex -SavedBuffer $__savedSlashBuf
                         $script:NeedsFullPaint = $true
                         continue
                     }
@@ -3158,7 +3313,7 @@ function script:Run-TUI {
                     if ($sr.Expand) {
                         $inputBuffer = "/" + $sr.Expand
                         $script:SlashMenuDismissed = $false
-                        $null = Enter-SlashExpand -ParentName $sr.Expand -ParentSelIndex 0
+                        $null = Enter-SlashExpand -ParentName $sr.Expand -ParentSelIndex 0 -SavedBuffer "/"
                         $script:NeedsFullPaint = $true
                         continue
                     }
@@ -3243,9 +3398,15 @@ function script:Run-TUI {
                         Sync-SlashSelection -Matches $sm
                         $sel = $sm[$script:SlashSelIndex]
                         if (Test-SlashExpandable -Item $sel) {
+                            $__savedSlashBuf = $inputBuffer
+
+                            if ([string]::IsNullOrWhiteSpace($__savedSlashBuf) -or $__savedSlashBuf -eq ("/" + $sel.Name)) { $__savedSlashBuf = "/" }
+
                             $inputBuffer = "/" + $sel.Name
+
                             $script:SlashMenuDismissed = $false
-                            $null = Enter-SlashExpand -ParentName $sel.Name -ParentSelIndex $script:SlashSelIndex
+
+                            $null = Enter-SlashExpand -ParentName $sel.Name -ParentSelIndex $script:SlashSelIndex -SavedBuffer $__savedSlashBuf
                             $script:NeedsFullPaint = $true
                         }
                     }
@@ -3254,14 +3415,14 @@ function script:Run-TUI {
             } elseif ($key.Key -eq "LeftArrow") {
                 $script:EscArmUntil = $null
                 if ($script:SlashExpand) {
-                    Exit-SlashExpand
+                    Exit-SlashExpand -BufferRef ([ref]$inputBuffer)
                     $script:NeedsFullPaint = $true
                     continue
                 }
             } elseif ($key.Key -eq "Backspace") {
                 $script:EscArmUntil = $null
                 if ($script:SlashExpand) {
-                    Exit-SlashExpand
+                    Exit-SlashExpand -BufferRef ([ref]$inputBuffer)
                     $script:NeedsFullPaint = $true
                     continue
                 }
@@ -3288,7 +3449,7 @@ function script:Run-TUI {
                     Sync-SlashSelection -Matches $sm
                     $script:SlashSelIndex = ($script:SlashSelIndex - 1 + $sm.Count) % $sm.Count
                     $script:NeedsFullPaint = $true
-                } elseif ([string]::IsNullOrEmpty($inputBuffer) -or $script:InPromptHistory) {
+                } elseif ($script:InPromptHistory -or ([string]::IsNullOrEmpty($inputBuffer) -and $script:PromptHistory.Count -gt 0)) {
                     if ($script:PromptHistory.Count -gt 0) {
                         if (-not $script:InPromptHistory) {
                             $script:PromptHistoryIndex = $script:PromptHistory.Count - 1
@@ -3300,6 +3461,7 @@ function script:Run-TUI {
                         $script:NeedsFullPaint = $true
                     }
                 } else {
+                    # Empty prompt + no history, or non-empty prompt: scroll chat
                     $script:NeedsFullPaint = $true
                     if ($scrollOffset -eq [int]::MaxValue) {
                         $max = if ($script:LastMaxStart -ge 0) { $script:LastMaxStart } else { 0 }
@@ -3437,7 +3599,7 @@ Keys:
   /          Open slash-command autocomplete dropdown
   ?          Open shortcuts cheatsheet (when prompt is empty)
   Ctrl+K     Command palette (slash actions)
-  Ctrl+Shift+C  Copy code block from reply (Ctrl+Alt+C fallback)
+  F6 / Ctrl+Alt+C  Copy code block (Ctrl+Shift+Y alt; Ctrl+Shift+C often stolen by WT)
   Right/Left In / menu: expand theme·model·search / collapse
   Ctrl+.     Open / close shortcuts cheatsheet
   Ctrl+U     Apply pending in-TUI update (when tip is shown)

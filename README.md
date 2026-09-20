@@ -64,7 +64,7 @@ nautilus help            # full command list
 - Smoother TUI paint in **0.4.0.1** (batched ANSI, no per-frame full clear, idle chrome-only refresh).
 - **0.4.0.2**: removed bottom model/theme/connection status footer; 2-line prompt; grouped `/` slash popup by category.
 - **0.4.1.3**: restored closed 3-line prompt frame; ASCII-safe chrome/separators for Big5 consoles; larger centered `/` modal.
-- **0.4.2.0**: `/copycode` + Ctrl+Shift+C; Right/Left expand for theme/model/search; slash ranking, empty-state, unified dispatch.
+- **0.4.2.2**: `/copycode` + **F6** / Ctrl+Alt+C (WT steals Ctrl+Shift+C); Right/Left expand for theme/model/search; slash ranking, empty-state, unified dispatch.
 
 ## Themes
 
@@ -85,7 +85,7 @@ nautilus theme Cyber
 - Local config at `~/.nautilus/config.json`, history at `~/.nautilus/history.json`.
 - Virtual Terminal processing is enabled in-process on Windows PowerShell 5.1.
 - Thinking spinner (Grok-Build inspired polish); connection flavour lives in the title bar / startup only.
-- ASCII box chrome (Big5-safe), grouped centered slash modal, command palette, prompt history, multiline input, smoother frame paint, retuned dark palettes (0.4.0.1-0.4.2.0).
+- ASCII box chrome (Big5-safe), grouped centered slash modal, command palette, prompt history, multiline input, smoother frame paint, retuned dark palettes (0.4.0.1-0.4.2.2).
 
 ## Repository layout
 
