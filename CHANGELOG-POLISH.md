@@ -1,3 +1,9 @@
+﻿# 0.3.44.1
+
+- **Critical:** ship PowerShell files as **UTF-8 with BOM** so Windows PowerShell 5.1 (e.g. zh-TW CP950) can parse the module. Without BOM, spinner glyphs corrupted and `Import-Module` failed — `nautilus` not found after install.
+- Replace braille spinner with ASCII `| / - \`.
+- Installer: do not call `nautilus` unless import succeeded; print real import errors.
+
 # Nautilus 0.3.44.0 — polish changelog
 
 Built on 0.3.43.1. Proxy, gist key URL, and Gemini endpoint wiring are unchanged.

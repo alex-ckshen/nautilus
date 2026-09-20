@@ -1,11 +1,11 @@
-<#
+﻿<#
     Nautilus - a pure-PowerShell futuristic TUI AI assistant.
     JARVIS-style personality, Gemini-powered, blue sci-fi aesthetic.
     Public command: nautilus  (alias: naut)
-    Version: 0.3.44.0
+    Version: 0.3.44.1
 #>
 
-$script:NautilusVersion = "0.3.44.0"
+$script:NautilusVersion = "0.3.44.1"
 $script:TuiActive = $false
 $script:TuiForceExit = $false
 $script:CancelHandlerRegistered = $false
@@ -443,7 +443,7 @@ function script:Format-ApiError {
         return "Rate limit hit, Daddy. Wait a moment and try again. ($err)"
     }
     if ($err -match '503|unavailable|Service Unavailable') { return "Gemini/Worker temporarily unavailable (503). Wait a few seconds and try again." }
-    if ($err -match 'timeout|timed out|作業逾時|Timeout') { return "Request timed out, Daddy. The model or the network took too long. Try again or switch to a lighter model." }
+    if ($err -match 'timeout|timed out|\u4f5c\u696d\u903e\u6642|Timeout') { return "Request timed out, Daddy. The model or the network took too long. Try again or switch to a lighter model." }
     return "Connection trouble. ($err)"
 }
 
@@ -673,7 +673,7 @@ function script:Build-Contents {
 # ===========================================================================
 #  TUI CORE
 # ===========================================================================
-$script:Spinner = @("⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏")
+$script:Spinner = @("|","/","-","\\","|","/","-","\\")
 $script:ThinkingLines = @(
     "One sec, Daddy."
     "I'll do that right now, boss."
@@ -1746,7 +1746,7 @@ function nautilus {
 }
 
 try {
-    Set-Alias -Name naut -Value nautilus -Scope Global -ErrorAction Stop
+    Set-Alias -Name naut -Value nautilus -Scope Global -ErrorAction SilentlyContinue
 } catch {
     try { Set-Alias -Name naut -Value nautilus -Scope Local -ErrorAction SilentlyContinue } catch { }
 }

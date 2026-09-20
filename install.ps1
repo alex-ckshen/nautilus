@@ -1,4 +1,4 @@
-<#
+﻿<#
     Nautilus - pure-PowerShell TUI AI assistant.
     Installer: downloads the module to ~/.nautilus and registers the `nautilus`
     command in the current user's PowerShell profile so it is available in every
@@ -217,11 +217,20 @@ if (-not $targetProfile) { $targetProfile = Join-Path (Split-Path $PROFILE) "pro
 Add-ProfileBlock -ProfilePath $targetProfile
 
 # --- Load into the current session immediately --------------------------------
+$script:NautilusImportOk = $false
 try {
     Import-Module (Join-Path $ModuleRoot "Nautilus.psd1") -Force -ErrorAction Stop
-    Write-Host (W-G "  module loaded in current session")
+    if (Get-Command nautilus -ErrorAction SilentlyContinue) {
+        $script:NautilusImportOk = $true
+        Write-Host (W-G "  module loaded in current session")
+    } else {
+        Write-Host (W-Y "  module file installed, but 'nautilus' is not yet on PATH in this session")
+        Write-Host (W-Y "  open a new PowerShell window, then run: nautilus")
+    }
 } catch {
-    Write-Host (W-Y "  note: open a new PowerShell session to use nautilus")
+    Write-Host (W-R "  failed to load module in this session:")
+    Write-Host (W-R "  $($_.Exception.Message)")
+    Write-Host (W-Y "  Files are installed. Open a NEW PowerShell window and run: nautilus")
 }
 
 Write-Host ""
@@ -240,9 +249,14 @@ Write-Host (W-G "    nautilus update         - self-update")
 Write-Host (W-G "    nautilus uninstall      - remove Nautilus")
 Write-Host ""
 if (-not $Silent) {
-    Write-Host (W-D "  Launch now? [Y/n]")
-    $reply = Read-Host
-    if (-not $reply -or $reply -match "^[Yy]") {
-        nautilus
+    if ($script:NautilusImportOk -and (Get-Command nautilus -ErrorAction SilentlyContinue)) {
+        Write-Host (W-D "  Launch now? [Y/n]")
+        $reply = Read-Host
+        if (-not $reply -or $reply -match "^[Yy]") {
+            & nautilus
+        }
+    } else {
+        Write-Host (W-Y "  Skip auto-launch (module not active in this session).")
+        Write-Host (W-C "  Next: open a new PowerShell window, then run:  nautilus")
     }
 }
