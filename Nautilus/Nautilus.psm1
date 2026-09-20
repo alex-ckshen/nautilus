@@ -2,10 +2,10 @@
     Nautilus - a pure-PowerShell futuristic TUI AI assistant.
     JARVIS-style personality, Gemini-powered, blue sci-fi aesthetic.
     Public command: nautilus  (alias: naut)
-    Version: 0.4.1.3
+    Version: 0.4.2.0
 #>
 
-$script:NautilusVersion = "0.4.1.3"
+$script:NautilusVersion = "0.4.2.0"
 $script:TuiActive = $false
 $script:TuiForceExit = $false
 $script:CancelHandlerRegistered = $false
@@ -33,6 +33,8 @@ $script:LastWinH = 0
 $script:PromptHistory = New-Object System.Collections.Generic.List[string]
 $script:PromptHistoryIndex = -1
 $script:InPromptHistory = $false
+$script:HintCopyCode = $false
+$script:SlashExpand = $null   # @{ Parent; Options; Values; SelIndex; Title }
 
 # ===========================================================================
 #  PRIVATE CONFIG
@@ -95,6 +97,12 @@ Core personality rules:
 - You may naturally reference who he is when it fits the conversation, but never overdo compliments.
 
 You exist to make Daddy's life smoother, sharper, and more enjoyable.
+
+TUI / copyable code (important):
+- You run inside a pure-PowerShell terminal UI that parses markdown fenced code blocks.
+- When you share copyable code, put it in a fenced block with a language tag (e.g. ```powershell ... ```).
+- Prefer one clear fence per snippet so Daddy can copy it with Ctrl+Shift+C or /copycode.
+- Keep prose outside fences. Do not wrap an entire reply in a single fence.
 "@
 
 $script:ImproveSystemPrompt = @"
@@ -273,22 +281,35 @@ function script:Get-SlashCategoryOrder {
 }
 
 function script:Get-SlashCatalog {
-    # Wave 1 + existing commands, tagged for grouped / dropdown
+    # Action-oriented descriptions; Alias surfaces in filter without a duplicate row.
     return @(
-        @{ Name = 'new';       Desc = 'new chat (clear history)';   Category = 'Session';            Argful = $false }
-        @{ Name = 'clear';     Desc = 'wipe conversation history';  Category = 'Session';            Argful = $false }
-        @{ Name = 'exit';      Desc = 'close Nautilus';             Category = 'Session';            Argful = $false }
-        @{ Name = 'update';    Desc = 'self-update from Pages';     Category = 'Session';            Argful = $false }
-        @{ Name = 'copy';      Desc = 'copy last assistant reply';  Category = 'Clipboard & export'; Argful = $false }
-        @{ Name = 'export';    Desc = 'export transcript to file';  Category = 'Clipboard & export'; Argful = $true }
-        @{ Name = 'theme';     Desc = 'switch colour theme';        Category = 'Theme & UI';         Argful = $true }
-        @{ Name = 'model';     Desc = 'pick Gemini model';          Category = 'Theme & UI';         Argful = $true }
-        @{ Name = 'config';    Desc = 'view configuration';         Category = 'Theme & UI';         Argful = $false }
-        @{ Name = 'search';    Desc = 'toggle search grounding';    Category = 'Theme & UI';         Argful = $true }
-        @{ Name = 'improve';   Desc = 'improve my own code';         Category = 'Theme & UI';         Argful = $true }
-        @{ Name = 'help';      Desc = 'show commands and keys';     Category = 'Help';               Argful = $false }
-        @{ Name = 'shortcuts'; Desc = 'keyboard shortcuts sheet';   Category = 'Help';               Argful = $false }
+        @{ Name = 'new';       Desc = 'start a fresh chat';           Category = 'Session';            Argful = $false; Alias = '' }
+        @{ Name = 'clear';     Desc = 'wipe chat history';            Category = 'Session';            Argful = $false; Alias = '' }
+        @{ Name = 'exit';      Desc = 'quit Nautilus';                Category = 'Session';            Argful = $false; Alias = 'quit' }
+        @{ Name = 'update';    Desc = 'apply latest update';         Category = 'Session';            Argful = $false; Alias = '' }
+        @{ Name = 'copy';      Desc = 'copy last reply';              Category = 'Clipboard & export'; Argful = $false; Alias = '' }
+        @{ Name = 'copycode';  Desc = 'copy a code fence';            Category = 'Clipboard & export'; Argful = $false; Alias = 'cc' }
+        @{ Name = 'export';    Desc = 'save transcript to file';      Category = 'Clipboard & export'; Argful = $true;  Alias = '' }
+        @{ Name = 'theme';     Desc = 'change colour theme';          Category = 'Theme & UI';         Argful = $true;  Alias = ''; Expandable = $true }
+        @{ Name = 'model';     Desc = 'choose Gemini model';          Category = 'Theme & UI';         Argful = $true;  Alias = ''; Expandable = $true }
+        @{ Name = 'config';    Desc = 'show settings';                Category = 'Theme & UI';         Argful = $false; Alias = '' }
+        @{ Name = 'search';    Desc = 'toggle web search grounding';  Category = 'Theme & UI';         Argful = $true;  Alias = ''; Expandable = $true }
+        @{ Name = 'improve';   Desc = 'ask me to improve myself';     Category = 'Theme & UI';         Argful = $true;  Alias = '' }
+        @{ Name = 'help';      Desc = 'list commands and keys';       Category = 'Help';               Argful = $false; Alias = '' }
+        @{ Name = 'shortcuts'; Desc = 'open keyboard cheatsheet';     Category = 'Help';               Argful = $false; Alias = 'keys' }
     )
+}
+
+function script:Resolve-SlashName {
+    param([string]$Name)
+    if ([string]::IsNullOrWhiteSpace($Name)) { return $Name }
+    $n = $Name.Trim().ToLower()
+    foreach ($it in @(Get-SlashCatalog)) {
+        if ($it.Name -eq $n) { return $it.Name }
+        $al = [string]$it.Alias
+        if (-not [string]::IsNullOrWhiteSpace($al) -and $al.ToLower() -eq $n) { return $it.Name }
+    }
+    return $n
 }
 
 function script:Get-SlashMatches {
@@ -298,18 +319,117 @@ function script:Get-SlashMatches {
     if ($Buffer -notmatch '^/\S*$') { return @() }
     $prefix = if ($Buffer.Length -le 1) { "" } else { $Buffer.Substring(1) }
     $all = @(Get-SlashCatalog)
-    $filtered = @()
+    $scored = @()
     foreach ($item in $all) {
-        if ([string]::IsNullOrEmpty($prefix) -or $item.Name.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
-            $filtered += $item
+        $name = [string]$item.Name
+        $alias = [string]$item.Alias
+        $desc = [string]$item.Desc
+        $score = 100
+        if (-not [string]::IsNullOrEmpty($prefix)) {
+            $p = $prefix
+            $exact = $name.Equals($p, [System.StringComparison]::OrdinalIgnoreCase)
+            $exactAlias = (-not [string]::IsNullOrWhiteSpace($alias)) -and $alias.Equals($p, [System.StringComparison]::OrdinalIgnoreCase)
+            $prefixHit = $name.StartsWith($p, [System.StringComparison]::OrdinalIgnoreCase)
+            $aliasPrefix = (-not [string]::IsNullOrWhiteSpace($alias)) -and $alias.StartsWith($p, [System.StringComparison]::OrdinalIgnoreCase)
+            $contains = ($name.IndexOf($p, [System.StringComparison]::OrdinalIgnoreCase) -ge 0)
+            $aliasContains = (-not [string]::IsNullOrWhiteSpace($alias)) -and ($alias.IndexOf($p, [System.StringComparison]::OrdinalIgnoreCase) -ge 0)
+            $descHit = ($p.Length -ge 3) -and ($desc.IndexOf($p, [System.StringComparison]::OrdinalIgnoreCase) -ge 0)
+            if ($exact -or $exactAlias) { $score = 0 }
+            elseif ($prefixHit -or $aliasPrefix) { $score = 1 }
+            elseif ($contains -or $aliasContains) { $score = 2 }
+            elseif ($descHit) { $score = 3 }
+            else { continue }
         }
+        $scored += [pscustomobject]@{ Score = $score; Item = $item }
     }
-    # Stable group order for effortless scanning
     $order = @(Get-SlashCategoryOrder)
     $rank = @{}
     for ($i = 0; $i -lt $order.Count; $i++) { $rank[$order[$i]] = $i }
-    $sorted = @($filtered | Sort-Object @{ Expression = { if ($rank.ContainsKey([string]$_.Category)) { $rank[[string]$_.Category] } else { 99 } } }, @{ Expression = { $_.Name } })
-    return $sorted
+    $sorted = @($scored | Sort-Object `
+        @{ Expression = { $_.Score } }, `
+        @{ Expression = { if ($rank.ContainsKey([string]$_.Item.Category)) { $rank[[string]$_.Item.Category] } else { 99 } } }, `
+        @{ Expression = { $_.Item.Name } })
+    $out = @()
+    foreach ($s in $sorted) { $out += $s.Item }
+    return $out
+}
+
+function script:Get-ModelList {
+    return @(
+        "gemini-3.8-flash"
+        "gemini-3.7-flash"
+        "gemini-3.6-flash"
+        "gemini-3.5-flash"
+        "gemini-3.5-flash-lite"
+        "gemini-3.1-flash-lite"
+        "gemini-2.5-flash"
+    )
+}
+
+function script:Get-SlashExpandOptions {
+    # Returns $null or @{ Title; Options; Values; DefaultIndex }
+    param([string]$Name)
+    $n = Resolve-SlashName -Name $Name
+    switch ($n) {
+        'theme' {
+            $opts = @($script:Themes.Keys)
+            $cur = if ($script:Config -and $script:Config.theme) { [string]$script:Config.theme } else { "Nautilus" }
+            $idx = [array]::IndexOf($opts, $cur)
+            if ($idx -lt 0) { $idx = 0 }
+            return @{ Title = 'theme'; Options = $opts; Values = $opts; DefaultIndex = $idx }
+        }
+        'model' {
+            $opts = @(Get-ModelList)
+            $cur = if ($script:Config -and $script:Config.model) { [string]$script:Config.model } else { $script:DefaultModel }
+            $idx = [array]::IndexOf($opts, $cur)
+            if ($idx -lt 0) { $idx = 0 }
+            return @{ Title = 'model'; Options = $opts; Values = $opts; DefaultIndex = $idx }
+        }
+        'search' {
+            $on = $false
+            try { if ($script:Config -and $script:Config.enableSearch) { $on = [bool]$script:Config.enableSearch } } catch { }
+            $idx = if ($on) { 0 } else { 1 }
+            return @{ Title = 'search'; Options = @('on', 'off'); Values = @('on', 'off'); DefaultIndex = $idx }
+        }
+        default { return $null }
+    }
+}
+
+function script:Test-SlashExpandable {
+    param($Item)
+    if (-not $Item) { return $false }
+    if ($Item.ContainsKey('Expandable') -and $Item.Expandable) { return $true }
+    $opts = Get-SlashExpandOptions -Name ([string]$Item.Name)
+    return ($null -ne $opts)
+}
+
+function script:Enter-SlashExpand {
+    param(
+        [string]$ParentName,
+        [int]$ParentSelIndex = 0
+    )
+    $pack = Get-SlashExpandOptions -Name $ParentName
+    if (-not $pack) { return $false }
+    $script:SlashExpand = @{
+        Parent         = (Resolve-SlashName -Name $ParentName)
+        Options        = @($pack.Options)
+        Values         = @($pack.Values)
+        SelIndex       = [int]$pack.DefaultIndex
+        Title          = [string]$pack.Title
+        ParentSelIndex = $ParentSelIndex
+    }
+    return $true
+}
+
+function script:Exit-SlashExpand {
+    if ($script:SlashExpand -and $null -ne $script:SlashExpand.ParentSelIndex) {
+        $script:SlashSelIndex = [int]$script:SlashExpand.ParentSelIndex
+    }
+    $script:SlashExpand = $null
+}
+
+function script:Clear-SlashExpand {
+    $script:SlashExpand = $null
 }
 
 function script:Get-SlashFill {
@@ -340,8 +460,10 @@ function script:Sync-SlashSelection {
 function script:Test-SlashMenuOpen {
     param([string]$Buffer)
     if ($script:SlashMenuDismissed) { return $false }
-    $m = @(Get-SlashMatches -Buffer $Buffer)
-    return ($m.Count -gt 0)
+    if ($null -eq $Buffer) { return $false }
+    # Keep menu open for "/" and "/token" (incl. empty-result state)
+    if ($Buffer -notmatch '^/\S*$') { return $false }
+    return $true
 }
 
 function script:Draw-SlashDropdown {
@@ -349,20 +471,135 @@ function script:Draw-SlashDropdown {
         [array]$Matches,
         [int]$PromptTop,
         [int]$WinW,
-        [int]$WinH
+        [int]$WinH,
+        [string]$FilterPrefix = ""
     )
-    if (-not $Matches -or @($Matches).Count -eq 0) {
-        $script:SlashHitRows = @()
-        return
-    }
-    Sync-SlashSelection -Matches $Matches
-    $items = @($Matches)
-    $idx = $script:SlashSelIndex
     $box = Get-Box
     # Prefer draw width so modal right border clears host scrollbar
     $drawW = Get-DrawWidth
     if ($WinW -gt $drawW) { $WinW = $drawW }
     $th = if ($script:CurrentTheme) { $script:CurrentTheme } else { $script:Themes["Nautilus"] }
+
+    # Empty filter result: still show a small modal so the user is not left guessing
+    if (-not $Matches -or @($Matches).Count -eq 0) {
+        $script:SlashHitRows = @()
+        $msg = "no commands match"
+        if (-not [string]::IsNullOrWhiteSpace($FilterPrefix)) {
+            $msg = "no commands match /$FilterPrefix"
+        }
+        $footerHint = "esc dismiss  backspace edit"
+        $innerW = [Math]::Max(36, [Math]::Min([Math]::Max($msg.Length, $footerHint.Length) + 4, $WinW - 8))
+        if ($innerW -gt ($WinW - 6)) { $innerW = [Math]::Max(28, $WinW - 6) }
+        $boxW = $innerW + 2
+        $boxHeight = 4
+        $startRow = [Math]::Max(2, [int](($WinH - $boxHeight) / 2) + 1)
+        $startCol = [Math]::Max(1, [int](($WinW - $boxW) / 2) + 1)
+        $hLine = $box.H * $innerW
+        $row = $startRow
+        Write-At $row $startCol (Themed ($box.TL + $hLine + $box.TR) 'border')
+        $row++
+        $body = " " + $msg
+        if ($body.Length -gt $innerW) { $body = $body.Substring(0, [Math]::Max(1, $innerW - 3)) + "..." }
+        $pad = $innerW - $body.Length
+        if ($pad -lt 0) { $pad = 0 }
+        Write-At $row $startCol ((Themed $box.V 'border') + (Themed $body 'muted') + (" " * $pad) + (Themed $box.V 'border'))
+        $row++
+        $footPad = $innerW - 1 - $footerHint.Length
+        if ($footPad -lt 0) { $footPad = 0 }
+        Write-At $row $startCol ((Themed $box.V 'border') + (Dim (" " + $footerHint)) + (" " * $footPad) + (Themed $box.V 'border'))
+        $row++
+        Write-At $row $startCol (Themed ($box.BL + $hLine + $box.BR) 'border')
+        return
+    }
+
+    # ---- nested expand level (theme / model / search) — Grok-style Right-arrow drill-in ----
+    if ($script:SlashExpand -and $script:SlashExpand.Options -and @($script:SlashExpand.Options).Count -gt 0) {
+        $script:SlashHitRows = @()
+        $opts = @($script:SlashExpand.Options)
+        $vals = @($script:SlashExpand.Values)
+        $idx = [int]$script:SlashExpand.SelIndex
+        if ($idx -lt 0) { $idx = 0 }
+        if ($idx -ge $opts.Count) { $idx = $opts.Count - 1 }
+        $script:SlashExpand.SelIndex = $idx
+        $parentName = [string]$script:SlashExpand.Parent
+        $title = "/" + $parentName + "  ->"
+        $footerHint = "up/down move  enter apply  left back  esc"
+        $labelCol = 0
+        foreach ($o in $opts) {
+            $lw = ([string]$o).Length
+            if ($lw -gt $labelCol) { $labelCol = $lw }
+        }
+        $labelCol = [Math]::Min([Math]::Max($labelCol, 8), 36)
+        $contentW = [Math]::Max($title.Length, $footerHint.Length)
+        if ($labelCol + 6 -gt $contentW) { $contentW = $labelCol + 6 }
+        $innerW = [Math]::Max(40, [Math]::Min($contentW + 2, $WinW - 6))
+        if ($innerW -gt ($WinW - 4)) { $innerW = [Math]::Max(32, $WinW - 4) }
+        $boxW = $innerW + 2
+        $chromeRows = 4  # top + title + footer + bottom
+        $maxVisible = [Math]::Max(6, $WinH - 12)
+        if ($maxVisible -gt $opts.Count) { $maxVisible = $opts.Count }
+        if ($maxVisible -lt 1) { $maxVisible = 1 }
+        $viewTop = 0
+        if ($opts.Count -gt $maxVisible) {
+            $half = [int]($maxVisible / 2)
+            if ($idx -lt $half) { $viewTop = 0 }
+            elseif ($idx + $half -ge $opts.Count) { $viewTop = $opts.Count - $maxVisible }
+            else { $viewTop = $idx - $half }
+            if ($viewTop -lt 0) { $viewTop = 0 }
+        }
+        $viewEnd = [Math]::Min($opts.Count, $viewTop + $maxVisible)
+        $visCount = $viewEnd - $viewTop
+        $boxHeight = $visCount + $chromeRows
+        $startRow = [Math]::Max(2, [int](($WinH - $boxHeight) / 2) + 1)
+        if (($startRow + $boxHeight - 1) -gt $WinH) { $startRow = [Math]::Max(1, $WinH - $boxHeight + 1) }
+        $startCol = [Math]::Max(1, [int](($WinW - $boxW) / 2) + 1)
+        if (($startCol + $boxW - 1) -gt $WinW) { $startCol = [Math]::Max(1, $WinW - $boxW + 1) }
+        $hLine = $box.H * $innerW
+        $row = $startRow
+        Write-At $row $startCol (Themed ($box.TL + $hLine + $box.TR) 'border'); $row++
+        $tBody = " " + $title
+        if ($tBody.Length -gt $innerW) { $tBody = $tBody.Substring(0, [Math]::Max(1, $innerW - 3)) + "..." }
+        $tPad = $innerW - $tBody.Length; if ($tPad -lt 0) { $tPad = 0 }
+        Write-At $row $startCol ((Themed $box.V 'border') + (Bold $tBody $th.accent) + (" " * $tPad) + (Themed $box.V 'border')); $row++
+        for ($i = $viewTop; $i -lt $viewEnd; $i++) {
+            $lab = [string]$opts[$i]
+            $active = ""
+            if ($parentName -eq 'theme' -and $script:Config -and $lab -eq [string]$script:Config.theme) { $active = "  (active)" }
+            elseif ($parentName -eq 'model' -and $script:Config -and $lab -eq [string]$script:Config.model) { $active = "  (active)" }
+            elseif ($parentName -eq 'search') {
+                $on = $false
+                try { if ($script:Config.enableSearch) { $on = $true } } catch { }
+                if (($lab -eq 'on' -and $on) -or ($lab -eq 'off' -and -not $on)) { $active = "  (active)" }
+            }
+            $bodyCore = $lab + $active
+            if ($i -eq $idx) {
+                $body = "> " + $bodyCore
+                if ($body.Length -gt $innerW) { $body = $body.Substring(0, [Math]::Max(1, $innerW - 3)) + "..." }
+                $pad = $innerW - $body.Length; if ($pad -lt 0) { $pad = 0 }
+                Write-At $row $startCol ((Themed $box.V 'border') + (Bold $body $th.accent) + (" " * $pad) + (Themed $box.V 'border'))
+            } else {
+                $body = "  " + $bodyCore
+                if ($body.Length -gt $innerW) { $body = $body.Substring(0, [Math]::Max(1, $innerW - 3)) + "..." }
+                $pad = $innerW - $body.Length; if ($pad -lt 0) { $pad = 0 }
+                Write-At $row $startCol ((Themed $box.V 'border') + (Themed $body 'muted') + (" " * $pad) + (Themed $box.V 'border'))
+            }
+            $script:SlashHitRows += @{ Row = $row; Index = $i; Col = $startCol; Width = $boxW; Kind = 'expand' }
+            $row++
+        }
+        $footPad = $innerW - 1 - $footerHint.Length; if ($footPad -lt 0) { $footPad = 0 }
+        $footShown = $footerHint
+        if ($footShown.Length -gt ($innerW - 1)) {
+            $footShown = $footShown.Substring(0, [Math]::Max(1, $innerW - 4)) + "..."
+            $footPad = $innerW - 1 - $footShown.Length; if ($footPad -lt 0) { $footPad = 0 }
+        }
+        Write-At $row $startCol ((Themed $box.V 'border') + (Dim (" " + $footShown)) + (" " * $footPad) + (Themed $box.V 'border')); $row++
+        Write-At $row $startCol (Themed ($box.BL + $hLine + $box.BR) 'border')
+        return
+    }
+
+    Sync-SlashSelection -Matches $Matches
+    $items = @($Matches)
+    $idx = $script:SlashSelIndex
 
     # Build display rows: muted category headers + selectable command rows
     $display = New-Object System.Collections.Generic.List[object]
@@ -378,14 +615,18 @@ function script:Draw-SlashDropdown {
         $display.Add(@{ Kind = 'item'; Index = $i; Item = $it })
     }
 
-    $footerHint = "up/down  tab fill  enter run  esc"
+    $footerHint = "up/down  right expand  tab fill  enter run  esc"
 
     $labelCol = 0
     foreach ($it in $items) {
-        $lw = ("/" + $it.Name).Length
+        $alias = [string]$it.Alias
+        $lab = "/" + $it.Name
+        if (-not [string]::IsNullOrWhiteSpace($alias)) { $lab = $lab + "|/" + $alias }
+        $lw = $lab.Length
         if ($lw -gt $labelCol) { $labelCol = $lw }
     }
-    $labelCol = [Math]::Min([Math]::Max($labelCol, 8), 16)
+    # Prefer full command names; allow wider labels before truncating descriptions
+    $labelCol = [Math]::Min([Math]::Max($labelCol, 8), 22)
 
     $maxDesc = 0
     foreach ($it in $items) {
@@ -398,9 +639,9 @@ function script:Draw-SlashDropdown {
     }
     if ($footerHint.Length + 1 -gt $contentW) { $contentW = $footerHint.Length + 1 }
 
-    # Large centered modal: wider so descriptions fit; taller for groups + rows
-    $innerW = [Math]::Max(48, [Math]::Min($contentW + 2, $WinW - 8))
-    if ($innerW -gt ($WinW - 6)) { $innerW = [Math]::Max(36, $WinW - 6) }
+    # Large centered modal: wider so descriptions rarely need "..." truncation
+    $innerW = [Math]::Max(56, [Math]::Min($contentW + 2, $WinW - 6))
+    if ($innerW -gt ($WinW - 4)) { $innerW = [Math]::Max(40, $WinW - 4) }
     $boxW = $innerW + 2
 
     # Prefer showing all filtered rows when the window allows
@@ -464,7 +705,10 @@ function script:Draw-SlashDropdown {
         }
         $i = [int]$dr.Index
         $it = $dr.Item
+        $alias = [string]$it.Alias
         $label = "/" + $it.Name
+        if (-not [string]::IsNullOrWhiteSpace($alias)) { $label = $label + "|/" + $alias }
+        if (Test-SlashExpandable -Item $it) { $label = $label + " >" }
         if ($label.Length -lt $labelCol) { $label = $label + (" " * ($labelCol - $label.Length)) }
         $desc = [string]$it.Desc
         $descBudget = [Math]::Max(4, $innerW - 2 - $labelCol - 2)
@@ -1471,6 +1715,11 @@ function script:Get-ShortcutRows {
         @{ Keys = 'Tab';       Desc = 'Fill selected slash command' }
         @{ Keys = '/new';      Desc = 'New chat (clear history)' }
         @{ Keys = '/copy';     Desc = 'Copy last assistant reply' }
+        @{ Keys = '/copycode'; Desc = 'Copy code fence (/cc)' }
+        @{ Keys = 'Ctrl+Shift+C'; Desc = 'Copy code block from reply' }
+        @{ Keys = 'Ctrl+Alt+C'; Desc = 'Copy code block (fallback)' }
+        @{ Keys = 'Right';     Desc = 'Expand theme/model/search in / menu' }
+        @{ Keys = 'Left';      Desc = 'Collapse expanded / submenu' }
         @{ Keys = '/export';   Desc = 'Export transcript to file' }
         @{ Keys = '/help';     Desc = 'Slash help (same bindings listed)' }
         @{ Keys = '/shortcuts'; Desc = 'Open shortcuts cheatsheet' }
@@ -1699,22 +1948,98 @@ function script:Add-PromptHistory {
     $script:InPromptHistory = $false
 }
 
-function script:Copy-LastAssistant {
-    param([array]$Messages)
-    $text = $null
-    for ($i = @($Messages).Count - 1; $i -ge 0; $i--) {
-        $m = $Messages[$i]
-        if ($m.role -eq 'assistant' -and -not [string]::IsNullOrWhiteSpace([string]$m.content)) {
-            $text = [string]$m.content
-            break
-        }
-    }
-    if (-not $text) { return @{ Ok = $false; Notice = "no assistant message to copy" } }
+function script:Get-CodeFences {
+    param([string]$Text)
+    $results = New-Object System.Collections.Generic.List[object]
+    if ([string]::IsNullOrEmpty($Text)) { return @() }
 
+    # PS 5.1-safe line scan for ``` / ~~~ fences (optional lang tag).
+    $nl = [char]10
+    $norm = ([string]$Text) -replace "`r`n", "`n" -replace "`r", "`n"
+    $lines = $norm.Split(@($nl), [System.StringSplitOptions]::None)
+    $i = 0
+    $idx = 0
+    while ($i -lt $lines.Length) {
+        $rawLine = [string]$lines[$i]
+        $trim = $rawLine.TrimStart()
+        $fenceChar = [char]0
+        $fenceLen = 0
+        if ($trim.Length -ge 3) {
+            $c0 = $trim[0]
+            if ($c0 -eq [char]96 -or $c0 -eq [char]126) {
+                $j = 0
+                while ($j -lt $trim.Length -and $trim[$j] -eq $c0) { $j++ }
+                if ($j -ge 3) { $fenceChar = $c0; $fenceLen = $j }
+            }
+        }
+        if ($fenceLen -ge 3) {
+            $info = ""
+            if ($trim.Length -gt $fenceLen) { $info = $trim.Substring($fenceLen).Trim() }
+            $lang = ""
+            if (-not [string]::IsNullOrWhiteSpace($info)) {
+                $tok = ($info -split '\s+', 2)[0]
+                $lang = [string]$tok
+            }
+            $codeParts = New-Object System.Collections.Generic.List[string]
+            $i++
+            $closed = $false
+            while ($i -lt $lines.Length) {
+                $cline = [string]$lines[$i]
+                $ctrim = $cline.TrimStart()
+                $isClose = $false
+                if ($ctrim.Length -ge $fenceLen -and $ctrim.Length -gt 0 -and $ctrim[0] -eq $fenceChar) {
+                    $k = 0
+                    while ($k -lt $ctrim.Length -and $ctrim[$k] -eq $fenceChar) { $k++ }
+                    if ($k -ge $fenceLen) {
+                        $after = ""
+                        if ($ctrim.Length -gt $k) { $after = $ctrim.Substring($k) }
+                        if ([string]::IsNullOrWhiteSpace($after)) { $isClose = $true }
+                    }
+                }
+                if ($isClose) { $closed = $true; break }
+                [void]$codeParts.Add($cline)
+                $i++
+            }
+            if ($closed -or $codeParts.Count -gt 0) {
+                $code = [string]::Join("`n", $codeParts.ToArray())
+                $previewSrc = ($code -replace "`n", " ").Trim()
+                if ([string]::IsNullOrEmpty($previewSrc)) { $previewSrc = "(empty)" }
+                $preview = $previewSrc
+                if ($preview.Length -gt 40) { $preview = $preview.Substring(0, 37) + "..." }
+                $idx++
+                [void]$results.Add(@{ Index = $idx; Lang = $lang; Code = $code; Preview = $preview })
+            }
+            if ($closed) { $i++ }
+            continue
+        }
+        $i++
+    }
+    return @($results.ToArray())
+}
+
+function script:Get-CopyableCodeBlocks {
+    param([array]$Messages, [int]$MaxAssistantScan = 8)
+    $msgs = @($Messages)
+    $scanned = 0
+    for ($i = $msgs.Count - 1; $i -ge 0; $i--) {
+        $m = $msgs[$i]
+        if ($null -eq $m) { continue }
+        if ([string]$m.role -ne 'assistant') { continue }
+        $scanned++
+        $fences = @(Get-CodeFences -Text ([string]$m.content))
+        if ($fences.Count -gt 0) { return $fences }
+        if ($scanned -ge $MaxAssistantScan) { break }
+    }
+    return @()
+}
+
+function script:Copy-TextToClipboard {
+    param([string]$Text)
+    if ($null -eq $Text) { $Text = "" }
     $copied = $false
     try {
         if (Get-Command Set-Clipboard -ErrorAction SilentlyContinue) {
-            Set-Clipboard -Value $text -ErrorAction Stop
+            Set-Clipboard -Value $Text -ErrorAction Stop
             $copied = $true
         }
     } catch { }
@@ -1722,23 +2047,248 @@ function script:Copy-LastAssistant {
         try {
             $clip = Get-Command clip.exe -ErrorAction SilentlyContinue
             if ($clip) {
-                $text | & clip.exe
+                $Text | & clip.exe
                 if ($LASTEXITCODE -eq 0 -or $null -eq $LASTEXITCODE) { $copied = $true }
             }
         } catch { }
     }
-    if ($copied) { return @{ Ok = $true; Notice = "copied last reply to clipboard" } }
-
+    if ($copied) { return @{ Ok = $true; Notice = "copied to clipboard"; Via = "clipboard" } }
     try {
         if (-not (Test-Path -LiteralPath $script:NautilusHome)) {
             New-Item -ItemType Directory -Path $script:NautilusHome -Force | Out-Null
         }
         $fallback = Join-Path $script:NautilusHome "last-copy.txt"
-        [System.IO.File]::WriteAllText($fallback, $text, [System.Text.UTF8Encoding]::new($false))
-        return @{ Ok = $true; Notice = "clipboard unavailable; wrote $fallback" }
+        [System.IO.File]::WriteAllText($fallback, $Text, [System.Text.UTF8Encoding]::new($false))
+        return @{ Ok = $true; Notice = "clipboard unavailable; wrote $fallback"; Via = "file" }
     } catch {
-        return @{ Ok = $false; Notice = "copy failed: $($_.Exception.Message)" }
+        return @{ Ok = $false; Notice = "copy failed: $($_.Exception.Message)"; Via = "none" }
     }
+}
+
+function script:Copy-LastAssistant {
+    param([array]$Messages)
+    $textOut = $null
+    for ($i = @($Messages).Count - 1; $i -ge 0; $i--) {
+        $m = $Messages[$i]
+        if ($m.role -eq 'assistant' -and -not [string]::IsNullOrWhiteSpace([string]$m.content)) {
+            $textOut = [string]$m.content
+            break
+        }
+    }
+    if (-not $textOut) { return @{ Ok = $false; Notice = "no assistant message to copy" } }
+    $cr = Copy-TextToClipboard -Text $textOut
+    if (-not $cr.Ok) { return $cr }
+    if ($cr.Via -eq "file") { return @{ Ok = $true; Notice = $cr.Notice } }
+    return @{ Ok = $true; Notice = "copied last reply to clipboard" }
+}
+
+function script:Copy-CodeBlock {
+    param([array]$Messages)
+    $blocks = @(Get-CopyableCodeBlocks -Messages $Messages)
+    if ($blocks.Count -eq 0) {
+        return @{ Ok = $false; Notice = "no code blocks in recent replies" }
+    }
+    $chosen = $null
+    if ($blocks.Count -eq 1) {
+        $chosen = $blocks[0]
+    } else {
+        $labels = New-Object System.Collections.Generic.List[string]
+        foreach ($b in $blocks) {
+            $langLabel = if (-not [string]::IsNullOrWhiteSpace([string]$b.Lang)) { [string]$b.Lang } else { "code" }
+            [void]$labels.Add(("{0}  {1}  {2}" -f $b.Index, $langLabel, $b.Preview))
+        }
+        $picked = Select-Menu -Title "Copy code block" -Options @($labels.ToArray()) -DefaultIndex 0
+        $script:NeedsFullClear = $true
+        $script:NeedsFullPaint = $true
+        if (-not $picked) { return @{ Ok = $false; Notice = "copy cancelled" } }
+        $pickIdx = [array]::IndexOf(@($labels.ToArray()), [string]$picked)
+        if ($pickIdx -lt 0) { return @{ Ok = $false; Notice = "copy cancelled" } }
+        $chosen = $blocks[$pickIdx]
+    }
+    $cr = Copy-TextToClipboard -Text ([string]$chosen.Code)
+    if (-not $cr.Ok) { return $cr }
+    $n = ([string]$chosen.Code).Length
+    $langBit = ""
+    if (-not [string]::IsNullOrWhiteSpace([string]$chosen.Lang)) {
+        $langBit = ([string]$chosen.Lang).ToLowerInvariant() + " "
+    }
+    $suffix = if ($cr.Via -eq "file") { " (file fallback)" } else { "" }
+    return @{ Ok = $true; Notice = ("copied {0}code block ({1} chars){2}" -f $langBit, $n, $suffix) }
+}
+
+function script:Confirm-DestructiveSlash {
+    param([string]$Title, [string]$YesLabel = "Yes", [string]$NoLabel = "Cancel")
+    $chosen = Select-Menu -Title $Title -Options @($YesLabel, $NoLabel) -DefaultIndex 1
+    $script:NeedsFullClear = $true
+    $script:NeedsFullPaint = $true
+    return ($chosen -eq $YesLabel)
+}
+
+function script:Invoke-SlashCommand {
+    param([string]$Name, [string]$Arg = "", [array]$Messages)
+    $name = Resolve-SlashName -Name $Name
+    $arg = if ($null -eq $Arg) { "" } else { $Arg }
+    $result = @{
+        Messages = $Messages; Notice = ""; Exit = $false; ApplyUpdate = $false
+        NeedsFullPaint = $true; NeedsFullClear = $false; Handled = $true
+    }
+    switch ($name) {
+        'help' {
+            $result.Messages = @($Messages) + [pscustomobject]@{ role = 'system'; content = (Get-HelpText) }
+        }
+        'shortcuts' {
+            Show-ShortcutsHelp
+            $result.NeedsFullClear = $true
+        }
+        'new' {
+            $count = @($Messages | Where-Object { $_.role -eq 'user' -or $_.role -eq 'assistant' }).Count
+            if ($count -gt 0) {
+                $ok = Confirm-DestructiveSlash -Title "Start a fresh chat?" -YesLabel "Yes, new chat" -NoLabel "Cancel"
+                if (-not $ok) { $result.Notice = "new chat cancelled"; return $result }
+            }
+            $result.Messages = @(); Save-History -messages @() -max 0
+            $result.Notice = "new chat ready"
+        }
+        'clear' {
+            $count = @($Messages | Where-Object { $_.role -eq 'user' -or $_.role -eq 'assistant' }).Count
+            if ($count -gt 0) {
+                $ok = Confirm-DestructiveSlash -Title "Wipe chat history?" -YesLabel "Yes, wipe it" -NoLabel "Cancel"
+                if (-not $ok) { $result.Notice = "clear cancelled"; return $result }
+            }
+            $result.Messages = @(); Save-History -messages @() -max 0
+            $result.Notice = "history wiped"
+        }
+        'copy' {
+            $cr = Copy-LastAssistant -Messages $Messages
+            $result.Notice = $cr.Notice
+        }
+        'copycode' {
+            $cr = Copy-CodeBlock -Messages $Messages
+            $result.Notice = $cr.Notice
+            $result.NeedsFullClear = $true
+        }
+        'export' {
+            $er = Export-Transcript -Messages $Messages -PathArg $arg
+            $result.Notice = $er.Notice
+        }
+        'exit' {
+            $result.Exit = $true
+            $result.Notice = "goodbye, Daddy"
+        }
+        'theme' {
+            if ($arg) {
+                if ($script:Themes.Contains($arg)) {
+                    $script:Config.theme = $arg
+                    $script:CurrentTheme = $script:Themes[$arg]
+                    Save-Config $script:Config
+                    $result.Notice = "theme -> $arg"
+                } else {
+                    $known = @($script:Themes.Keys) -join ", "
+                    $result.Notice = "unknown theme: $arg  (try $known)"
+                }
+            } else {
+                # Prefer inline expand; fallback Select-Menu only if expand helpers unavailable
+                if (Get-SlashExpandOptions -Name 'theme') {
+                    $result.Notice = "press Right to pick a theme"
+                    $result.Handled = $true
+                    $result.NeedsFullPaint = $true
+                    # Signal caller to expand rather than apply
+                    $result.Expand = 'theme'
+                } else {
+                    $themeNames = @($script:Themes.Keys)
+                    $currentIdx = [array]::IndexOf($themeNames, $script:Config.theme)
+                    if ($currentIdx -lt 0) { $currentIdx = 0 }
+                    $chosen = Select-Menu -Title "Select theme" -Options $themeNames -DefaultIndex $currentIdx
+                    $result.NeedsFullClear = $true
+                    if ($chosen) {
+                        $script:Config.theme = $chosen
+                        $script:CurrentTheme = $script:Themes[$chosen]
+                        Save-Config $script:Config
+                        $result.Notice = "theme -> $chosen"
+                    } else { $result.Notice = "theme unchanged" }
+                }
+            }
+        }
+        'config' {
+            $result.Messages = @($Messages) + [pscustomobject]@{ role = 'system'; content = (Get-ConfigText) }
+        }
+        'model' {
+            if ($arg) {
+                $script:Config.model = $arg
+                Save-Config $script:Config
+                $result.Notice = "model -> $arg"
+            } else {
+                $result.Expand = 'model'
+                $result.Notice = "press Right to pick a model"
+            }
+        }
+        'search' {
+            $cfg = Load-Config
+            $argLower = $arg.Trim().ToLower()
+            if ($argLower -eq 'on' -or $argLower -eq 'true' -or $argLower -eq '1') {
+                $cfg.enableSearch = $true; Save-Config $cfg; $script:Config = $cfg
+                $result.Notice = "search grounding ON"
+            } elseif ($argLower -eq 'off' -or $argLower -eq 'false' -or $argLower -eq '0') {
+                $cfg.enableSearch = $false; Save-Config $cfg; $script:Config = $cfg
+                $result.Notice = "search grounding OFF"
+            } elseif ([string]::IsNullOrWhiteSpace($argLower)) {
+                $result.Expand = 'search'
+                $result.Notice = "press Right to toggle search"
+            } else {
+                $state = if ($cfg.enableSearch) { "ON" } else { "OFF" }
+                $result.Notice = "search is $state  (use /search on|off)"
+            }
+        }
+        'update' {
+            $result.ApplyUpdate = $true; $result.Exit = $true
+            $result.Notice = "applying update..."
+        }
+        'improve' {
+            if (-not $arg) {
+                $result.Notice = "Usage: /improve <what you want me to change about myself>"
+            } else {
+                $srcPath = Join-Path $script:ModuleRoot "Nautilus.psm1"
+                $source  = if (Test-Path $srcPath) { Get-Content -Raw $srcPath } else { "(source not found)" }
+                $context = $source.Substring(0, [Math]::Min(14000, $source.Length))
+                $improveMessages = @(
+                    [pscustomobject]@{ role = 'user'; content = "Current Nautilus.psm1 (excerpt):`n$context`n`n---`nDaddy's request: $arg" }
+                )
+                $contents    = Build-Contents -messages $improveMessages
+                $streamState = Invoke-GeminiStream -Contents $contents -Model $script:Config.model -Temperature 0.35 -SystemPrompt $script:ImproveSystemPrompt
+                $spinIdx = 0; $cancelled = $false
+                while (-not $streamState.Done) {
+                    if ($script:TuiForceExit) { $cancelled = $true; break }
+                    if ([Console]::KeyAvailable) {
+                        $ck = [Console]::ReadKey($true)
+                        if ($ck.Key -eq "Escape") { $cancelled = $true; break }
+                    }
+                    Render-Frame -messages $Messages -inputBuffer "" -scrollOffset ([int]::MaxValue) `
+                                 -streamState $streamState -spinIdx $spinIdx `
+                                 -thinkingMsg "Reading my own code, Daddy..." -notice ""
+                    $spinIdx++; Start-Sleep -Milliseconds 70
+                }
+                if ($cancelled) {
+                    Dispose-StreamState $streamState
+                    $result.Notice = "improve cancelled"
+                    if ($script:TuiForceExit) { $result.Exit = $true }
+                } else {
+                    $final = (Get-StreamFullText $streamState).Trim()
+                    if ($final) {
+                        $result.Messages = @($Messages) + [pscustomobject]@{ role = 'assistant'; content = $final }
+                    } else {
+                        $result.Messages = @($Messages) + [pscustomobject]@{ role = 'system'; content = (Format-ApiError $streamState.Error) }
+                    }
+                    Dispose-StreamState $streamState
+                    Save-History -messages $result.Messages -max $script:Config.maxHistory
+                }
+            }
+        }
+        default {
+            $result.Handled = $false
+            $result.Notice = "unknown command: /$Name  (try /help)"
+        }
+    }
+    return $result
 }
 
 function script:Export-Transcript {
@@ -1887,6 +2437,9 @@ function script:Render-ChromeOnly {
         $hintCol = [Math]::Max(1, [int](($w - (("Update: v$ver available, press ctrl+u to restart").Length)) / 2))
     } else {
         $hintText = (Dim " enter") + (Themed " send" 'muted') + (Dim "  /") + (Themed " commands" 'muted') + (Dim "  ?") + (Themed " keys" 'muted') + (Dim "  esc") + (Themed " quit" 'muted')
+        if ($script:HintCopyCode -and [string]::IsNullOrEmpty($buf)) {
+            $hintText = $hintText + (Dim "  Ctrl+Shift+C") + (Themed " copy code" 'muted')
+        }
     }
     Write-At $hintRow 1 "" -ClearEol
     Write-At $hintRow $hintCol $hintText
@@ -2087,7 +2640,17 @@ function script:Render-Frame {
         $hintText = (Bold "Update: " $th.accent) + (Themed ("v$ver available, press ctrl+u to restart") 'accent')
         $hintCol = [Math]::Max(1, [int](($w - (("Update: v$ver available, press ctrl+u to restart").Length)) / 2))
     } else {
+        $script:HintCopyCode = $false
+        if ([string]::IsNullOrEmpty($bufEarly)) {
+            try {
+                $cbHint = @(Get-CopyableCodeBlocks -Messages $messages -MaxAssistantScan 3)
+                if ($cbHint.Count -gt 0) { $script:HintCopyCode = $true }
+            } catch { $script:HintCopyCode = $false }
+        }
         $hintText = (Dim " enter") + (Themed " send" 'muted') + (Dim "  /") + (Themed " commands" 'muted') + (Dim "  ?") + (Themed " keys" 'muted') + (Dim "  esc") + (Themed " quit" 'muted')
+        if ($script:HintCopyCode) {
+            $hintText = $hintText + (Dim "  Ctrl+Shift+C") + (Themed " copy code" 'muted')
+        }
     }
     Write-At $hintRow 1 "" -ClearEol
     Write-At $hintRow $hintCol $hintText
@@ -2113,14 +2676,12 @@ function script:Render-Frame {
     Write-At $promptMid 1 $midLine -ClearEol
     Write-At $promptBot 1 ((Themed ($box.BL + $hLine + $box.BR) 'border')) -ClearEol
 
-    # Slash autocomplete: large centered modal panel
-    if (-not $script:SlashMenuDismissed) {
+    # Slash autocomplete: large centered modal (root, empty-state, or Right-arrow expand)
+    if (-not $script:SlashMenuDismissed -and ($null -ne $inputBuffer) -and ($inputBuffer -match '^/\S*$' -or $script:SlashExpand)) {
         $slashMatches = @(Get-SlashMatches -Buffer $inputBuffer)
-        if ($slashMatches.Count -gt 0) {
-            Draw-SlashDropdown -Matches $slashMatches -PromptTop $promptTop -WinW $w -WinH $h
-        } else {
-            $script:SlashHitRows = @()
-        }
+        $fp = ""
+        if ($inputBuffer -match '^/\S+$' -and $inputBuffer.Length -gt 1) { $fp = $inputBuffer.Substring(1) }
+        Draw-SlashDropdown -Matches $slashMatches -PromptTop $promptTop -WinW $w -WinH $h -FilterPrefix $fp
     } else {
         $script:SlashHitRows = @()
     }
@@ -2275,8 +2836,21 @@ function script:Run-TUI {
 
             # Mouse wheel: slash menu first, else chat scroll (best-effort)
             if ($ev.Kind -eq 'MouseWheel') {
+                if ($script:SlashExpand) {
+                    $n = @($script:SlashExpand.Options).Count
+                    if ($n -gt 0) {
+                        if ($ev.Delta -gt 0) {
+                            $script:SlashExpand.SelIndex = ([int]$script:SlashExpand.SelIndex - 1 + $n) % $n
+                        } else {
+                            $script:SlashExpand.SelIndex = ([int]$script:SlashExpand.SelIndex + 1) % $n
+                        }
+                    }
+                    $script:NeedsFullPaint = $true
+                    continue
+                }
                 if (Test-SlashMenuOpen -Buffer $inputBuffer) {
                     $sm = @(Get-SlashMatches -Buffer $inputBuffer)
+                    if ($sm.Count -eq 0) { $script:NeedsFullPaint = $true; continue }
                     Sync-SlashSelection -Matches $sm
                     if ($ev.Delta -gt 0) {
                         $script:SlashSelIndex = ($script:SlashSelIndex - 1 + $sm.Count) % $sm.Count
@@ -2304,7 +2878,24 @@ function script:Run-TUI {
                 continue
             }
             if ($ev.Kind -eq 'MouseClick') {
-                if (Test-SlashMenuOpen -Buffer $inputBuffer) {
+                if ($script:SlashExpand) {
+                    $picked = $null
+                    foreach ($hit in @($script:SlashHitRows)) {
+                        if ($ev.Row -eq $hit.Row -and $ev.Col -ge $hit.Col -and $ev.Col -lt ($hit.Col + $hit.Width)) {
+                            $picked = $hit.Index
+                            break
+                        }
+                    }
+                    if ($null -ne $picked) {
+                        $script:SlashExpand.SelIndex = [int]$picked
+                        # synthesize Enter to apply leaf
+                        $key = New-Object System.ConsoleKeyInfo ([char]13, [ConsoleKey]::Enter, $false, $false, $false)
+                        $ev = @{ Kind = 'Key'; Key = $key }
+                    } else {
+                        continue
+                    }
+                }
+                elseif (Test-SlashMenuOpen -Buffer $inputBuffer) {
                     $picked = $null
                     foreach ($hit in @($script:SlashHitRows)) {
                         if ($ev.Row -eq $hit.Row -and $ev.Col -ge $hit.Col -and $ev.Col -lt ($hit.Col + $hit.Width)) {
@@ -2316,7 +2907,15 @@ function script:Run-TUI {
                         $sm = @(Get-SlashMatches -Buffer $inputBuffer)
                         if ($picked -ge 0 -and $picked -lt $sm.Count) {
                             $script:SlashSelIndex = $picked
-                            $inputBuffer = Get-SlashFill -Item $sm[$picked]
+                            $sel = $sm[$picked]
+                            if (Test-SlashExpandable -Item $sel) {
+                                $inputBuffer = "/" + $sel.Name
+                                $script:SlashMenuDismissed = $false
+                                $null = Enter-SlashExpand -ParentName $sel.Name -ParentSelIndex $picked
+                                $script:NeedsFullPaint = $true
+                                continue
+                            }
+                            $inputBuffer = Get-SlashFill -Item $sel
                             $script:SlashMenuDismissed = $true
                             # Accept + run: synthesize Enter (PS 5.1-safe New-Object)
                             $key = New-Object System.ConsoleKeyInfo ([char]13, [ConsoleKey]::Enter, $false, $false, $false)
@@ -2350,77 +2949,50 @@ function script:Run-TUI {
                 $picked = Show-CommandPalette
                 $script:NeedsFullClear = $true
                 $script:NeedsFullPaint = $true
-                if ($picked) {
-                    if ($picked.Argful) {
-                        $inputBuffer = Get-SlashFill -Item $picked
-                        $script:SlashMenuDismissed = $true
-                    } else {
-                        # synthesize running the command
-                        $inputBuffer = Get-SlashFill -Item $picked
-                        $key = New-Object System.ConsoleKeyInfo ([char]13, [ConsoleKey]::Enter, $false, $false, $false)
-                        $ev = @{ Kind = 'Key'; Key = $key }
-                        # fall through by reassigning - handled below via goto-style: set and jump into Enter
-                        # Force Enter handling by recursive-style: put buffer and continue into Enter branch
-                    }
-                } else {
+                if (-not $picked) { continue }
+                Clear-SlashExpand
+                if (Test-SlashExpandable -Item $picked) {
+                    # Drill into inline options (no separate Select-Menu)
+                    $inputBuffer = "/" + $picked.Name
+                    $script:SlashMenuDismissed = $false
+                    $null = Enter-SlashExpand -ParentName $picked.Name -ParentSelIndex 0
+                    $script:NeedsFullPaint = $true
                     continue
                 }
-                if ($picked -and -not $picked.Argful) {
-                    # run immediately (same path as Enter on slash fill)
-                    $text = $inputBuffer.Trim()
-                    $inputBuffer = ""
-                    $script:InPromptHistory = $false
-                    $script:PromptHistoryIndex = -1
-                    if ($text.StartsWith("/")) {
-                        $cmd = $text.Substring(1).Trim()
-                        $parts = $cmd -split " ",2
-                        $name = $parts[0].ToLower()
-                        $arg = if ($parts.Count -gt 1) { $parts[1].Trim() } else { "" }
-                        switch ($name) {
-                            'help'      { $messages = @($messages) + [pscustomobject]@{ role='system'; content=(Get-HelpText) }; $script:NeedsFullPaint = $true }
-                            'shortcuts' { Show-ShortcutsHelp; $script:NeedsFullClear = $true; $script:NeedsFullPaint = $true }
-                            'new'       { $messages = @(); Save-History -messages $messages -max 0; $notice = "new chat, Daddy"; $script:NeedsFullPaint = $true }
-                            'clear'   { $messages = @(); Save-History -messages $messages -max 0; $notice = "history cleared, Daddy"; $script:NeedsFullPaint = $true }
-                            'copy'    { $cr = Copy-LastAssistant -Messages $messages; $notice = $cr.Notice }
-                            'export'  { $er = Export-Transcript -Messages $messages -PathArg $arg; $notice = $er.Notice }
-                            'exit'    { $running = $false }
-                            'theme'   {
-                                $themeNames = @($script:Themes.Keys)
-                                $currentIdx = [array]::IndexOf($themeNames, $script:Config.theme)
-                                if ($currentIdx -lt 0) { $currentIdx = 0 }
-                                $chosen = Select-Menu -Title "Select theme" -Options $themeNames -DefaultIndex $currentIdx
-                                $script:NeedsFullClear = $true; $script:NeedsFullPaint = $true
-                                if ($chosen) {
-                                    $script:Config.theme = $chosen
-                                    $script:CurrentTheme = $script:Themes[$chosen]
-                                    Save-Config $script:Config
-                                    $notice = "theme -> $chosen"
-                                }
-                            }
-                            'config'  { $messages = @($messages) + [pscustomobject]@{ role='system'; content=(Get-ConfigText) }; $script:NeedsFullPaint = $true }
-                            'model'   {
-                                $models = @("gemini-3.8-flash","gemini-3.7-flash","gemini-3.6-flash","gemini-3.5-flash","gemini-3.5-flash-lite","gemini-3.1-flash-lite","gemini-2.5-flash")
-                                $currentIdx = [array]::IndexOf($models, $script:Config.model)
-                                if ($currentIdx -lt 0) { $currentIdx = 4 }
-                                $chosen = Select-Menu -Title "Select model" -Options $models -DefaultIndex $currentIdx
-                                $script:NeedsFullClear = $true; $script:NeedsFullPaint = $true
-                                if ($chosen) {
-                                    $script:Config.model = $chosen
-                                    Save-Config $script:Config
-                                    $notice = "model -> $chosen"
-                                }
-                            }
-                            'search'  {
-                                $cfg = Load-Config
-                                $state = if ($cfg.enableSearch) { "ON" } else { "OFF" }
-                                $notice = "search grounding is currently $state  (use /search on|off)"
-                            }
-                            'update'  { $applyUpdate = $true; $running = $false }
-                            'improve' { $notice = "Usage: /improve <what you want me to change about myself>" }
-                            default   { $notice = "unknown command: /$name  (try /help)" }
-                        }
-                    }
+                if ($picked.Argful) {
+                    $inputBuffer = Get-SlashFill -Item $picked
+                    $script:SlashMenuDismissed = $true
+                    $script:NeedsFullPaint = $true
+                    continue
                 }
+                # Run immediately via unified dispatcher
+                $sr = Invoke-SlashCommand -Name $picked.Name -Arg "" -Messages $messages
+                if ($sr.Expand) {
+                    $inputBuffer = "/" + $sr.Expand
+                    $script:SlashMenuDismissed = $false
+                    $null = Enter-SlashExpand -ParentName $sr.Expand -ParentSelIndex 0
+                    $script:NeedsFullPaint = $true
+                    continue
+                }
+                $messages = $sr.Messages
+                $notice = $sr.Notice
+                if ($sr.NeedsFullClear) { $script:NeedsFullClear = $true }
+                $script:NeedsFullPaint = $true
+                if ($sr.ApplyUpdate) { $applyUpdate = $true }
+                if ($sr.Exit) { $running = $false }
+                continue
+            }
+
+            # Ctrl+Shift+C / Ctrl+Alt+C — copy fenced code (do not steal Ctrl+C cancel)
+            $hasCtrl = (($key.Modifiers -band [ConsoleModifiers]::Control) -ne 0)
+            $hasShift = (($key.Modifiers -band [ConsoleModifiers]::Shift) -ne 0)
+            $hasAltMod = (($key.Modifiers -band [ConsoleModifiers]::Alt) -ne 0)
+            $isCopyCodeKey = ($key.Key -eq "C") -and $hasCtrl -and ($hasShift -or $hasAltMod)
+            if ($isCopyCodeKey) {
+                $script:EscArmUntil = $null
+                $cr = Copy-CodeBlock -Messages $messages
+                $notice = $cr.Notice
+                $script:NeedsFullPaint = $true
                 continue
             }
 
@@ -2442,9 +3014,16 @@ function script:Run-TUI {
             }
 
             if ($key.Key -eq "Escape") {
+                if ($script:SlashExpand) {
+                    Exit-SlashExpand
+                    $script:EscArmUntil = $null
+                    $script:NeedsFullPaint = $true
+                    continue
+                }
                 if (Test-SlashMenuOpen -Buffer $inputBuffer) {
                     # Grok-like: dismiss dropdown, keep typed buffer
                     $script:SlashMenuDismissed = $true
+                    Clear-SlashExpand
                     $script:EscArmUntil = $null
                     $script:NeedsFullPaint = $true
                     continue
@@ -2458,12 +3037,41 @@ function script:Run-TUI {
                 }
             } elseif ($key.Key -eq "Tab") {
                 $script:EscArmUntil = $null
+                if ($script:SlashExpand) {
+                    # Tab in expand level = apply selected leaf
+                    $opts = @($script:SlashExpand.Options)
+                    $vals = @($script:SlashExpand.Values)
+                    $ix = [int]$script:SlashExpand.SelIndex
+                    $parent = [string]$script:SlashExpand.Parent
+                    if ($opts.Count -gt 0 -and $ix -ge 0 -and $ix -lt $opts.Count) {
+                        $leaf = [string]$vals[$ix]
+                        Clear-SlashExpand
+                        $script:SlashMenuDismissed = $true
+                        $inputBuffer = ""
+                        $sr = Invoke-SlashCommand -Name $parent -Arg $leaf -Messages $messages
+                        $messages = $sr.Messages; $notice = $sr.Notice
+                        if ($sr.NeedsFullClear) { $script:NeedsFullClear = $true }
+                        $script:NeedsFullPaint = $true
+                        if ($sr.ApplyUpdate) { $applyUpdate = $true }
+                        if ($sr.Exit) { $running = $false }
+                    }
+                    continue
+                }
                 if (Test-SlashMenuOpen -Buffer $inputBuffer) {
                     $sm = @(Get-SlashMatches -Buffer $inputBuffer)
-                    Sync-SlashSelection -Matches $sm
-                    $inputBuffer = Get-SlashFill -Item $sm[$script:SlashSelIndex]
-                    $script:SlashMenuDismissed = $true
-                    $script:NeedsFullPaint = $true
+                    if ($sm.Count -gt 0) {
+                        Sync-SlashSelection -Matches $sm
+                        $sel = $sm[$script:SlashSelIndex]
+                        if (Test-SlashExpandable -Item $sel) {
+                            $inputBuffer = "/" + $sel.Name
+                            $script:SlashMenuDismissed = $false
+                            $null = Enter-SlashExpand -ParentName $sel.Name -ParentSelIndex $script:SlashSelIndex
+                        } else {
+                            $inputBuffer = Get-SlashFill -Item $sel
+                            $script:SlashMenuDismissed = $true
+                        }
+                        $script:NeedsFullPaint = $true
+                    }
                 }
                 continue
             } elseif ($key.Key -eq "Enter") {
@@ -2476,12 +3084,55 @@ function script:Run-TUI {
                     $script:NeedsFullPaint = $true
                     continue
                 }
+
+                # Expanded submenu: Enter applies the leaf immediately
+                if ($script:SlashExpand) {
+                    $opts = @($script:SlashExpand.Options)
+                    $vals = @($script:SlashExpand.Values)
+                    $ix = [int]$script:SlashExpand.SelIndex
+                    $parent = [string]$script:SlashExpand.Parent
+                    if ($opts.Count -eq 0 -or $ix -lt 0 -or $ix -ge $opts.Count) {
+                        Exit-SlashExpand
+                        $script:NeedsFullPaint = $true
+                        continue
+                    }
+                    $leaf = [string]$vals[$ix]
+                    Clear-SlashExpand
+                    $script:SlashMenuDismissed = $true
+                    $inputBuffer = ""
+                    $script:InPromptHistory = $false
+                    $script:PromptHistoryIndex = -1
+                    $sr = Invoke-SlashCommand -Name $parent -Arg $leaf -Messages $messages
+                    $messages = $sr.Messages
+                    $notice = $sr.Notice
+                    if ($sr.NeedsFullClear) { $script:NeedsFullClear = $true }
+                    $script:NeedsFullPaint = $true
+                    if ($sr.ApplyUpdate) { $applyUpdate = $true }
+                    if ($sr.Exit) { $running = $false }
+                    continue
+                }
+
+                # Root slash menu: expandable → drill in; else fill then run
                 if (Test-SlashMenuOpen -Buffer $inputBuffer) {
                     $sm = @(Get-SlashMatches -Buffer $inputBuffer)
+                    if ($sm.Count -eq 0) {
+                        $script:SlashMenuDismissed = $true
+                        $script:NeedsFullPaint = $true
+                        continue
+                    }
                     Sync-SlashSelection -Matches $sm
-                    $inputBuffer = Get-SlashFill -Item $sm[$script:SlashSelIndex]
+                    $sel = $sm[$script:SlashSelIndex]
+                    if (Test-SlashExpandable -Item $sel) {
+                        $inputBuffer = "/" + $sel.Name
+                        $script:SlashMenuDismissed = $false
+                        $null = Enter-SlashExpand -ParentName $sel.Name -ParentSelIndex $script:SlashSelIndex
+                        $script:NeedsFullPaint = $true
+                        continue
+                    }
+                    $inputBuffer = Get-SlashFill -Item $sel
                     $script:SlashMenuDismissed = $true
                 }
+
                 # Trailing backslash continues the line (PS 5.1-friendly multiline)
                 if ($inputBuffer.Length -gt 0 -and $inputBuffer.EndsWith([string][char]92)) {
                     $inputBuffer = $inputBuffer.Substring(0, $inputBuffer.Length - 1) + "`n"
@@ -2496,147 +3147,27 @@ function script:Run-TUI {
                 if ([string]::IsNullOrWhiteSpace($text)) { continue }
                 Add-PromptHistory -Line $text
                 $script:NeedsFullPaint = $true
+                Clear-SlashExpand
 
                 if ($text.StartsWith("/")) {
                     $cmd = $text.Substring(1).Trim()
                     $parts = $cmd -split " ",2
                     $name = $parts[0].ToLower()
                     $arg = if ($parts.Count -gt 1) { $parts[1].Trim() } else { "" }
-
-                    switch ($name) {
-                        'help'      { $messages = @($messages) + [pscustomobject]@{ role='system'; content=(Get-HelpText) } }
-                        'shortcuts' { Show-ShortcutsHelp; $script:NeedsFullClear = $true; $script:NeedsFullPaint = $true }
-                        'new'       { $messages = @(); Save-History -messages $messages -max 0; $notice = "new chat, Daddy" }
-                        'clear'   { $messages = @(); Save-History -messages $messages -max 0; $notice = "history cleared, Daddy" }
-                        'copy'    { $cr = Copy-LastAssistant -Messages $messages; $notice = $cr.Notice }
-                        'export'  { $er = Export-Transcript -Messages $messages -PathArg $arg; $notice = $er.Notice }
-                        'exit'    { $running = $false }
-                        'theme'   {
-                            if ($arg) {
-                                if ($script:Themes.Contains($arg)) {
-                                    $script:Config.theme = $arg; $script:CurrentTheme = $script:Themes[$arg]; Save-Config $script:Config
-                                    $notice = "theme -> $arg"
-                                } else { $notice = "unknown theme: $arg" }
-                            } else {
-                                $themeNames = @($script:Themes.Keys)
-                                $currentIdx = [array]::IndexOf($themeNames, $script:Config.theme)
-                                if ($currentIdx -lt 0) { $currentIdx = 0 }
-                                $chosen = Select-Menu -Title "Select theme" -Options $themeNames -DefaultIndex $currentIdx
-                                $script:NeedsFullClear = $true
-                                $script:NeedsFullPaint = $true
-                                if ($chosen) {
-                                    $script:Config.theme = $chosen
-                                    $script:CurrentTheme = $script:Themes[$chosen]
-                                    Save-Config $script:Config
-                                    $notice = "theme -> $chosen"
-                                }
-                            }
-                        }
-                        'config'  { $messages = @($messages) + [pscustomobject]@{ role='system'; content=(Get-ConfigText) } }
-                        'improve' {
-                            if (-not $arg) {
-                                $notice = "Usage: /improve <what you want me to change about myself>"
-                            } else {
-                                $srcPath = Join-Path $script:ModuleRoot "Nautilus.psm1"
-                                $source  = if (Test-Path $srcPath) { Get-Content -Raw $srcPath } else { "(source not found)" }
-                                $context = $source.Substring(0, [Math]::Min(14000, $source.Length))
-
-                                $improveMessages = @(
-                                    [pscustomobject]@{ role = 'user'; content = "Current Nautilus.psm1 (excerpt):`n$context`n`n---`nDaddy's request: $arg" }
-                                )
-                                $contents    = Build-Contents -messages $improveMessages
-                                $streamState = Invoke-GeminiStream -Contents $contents -Model $script:Config.model -Temperature 0.35 -SystemPrompt $script:ImproveSystemPrompt
-
-                                $spinIdx = 0
-                                $cancelled = $false
-                                while (-not $streamState.Done) {
-                                    if ($script:TuiForceExit) { $cancelled = $true; break }
-                                    if ([Console]::KeyAvailable) {
-                                        $ck = [Console]::ReadKey($true)
-                                        if ($ck.Key -eq "Escape") { $cancelled = $true; break }
-                                    }
-                                    Render-Frame -messages $messages -inputBuffer "" -scrollOffset ([int]::MaxValue) `
-                                                 -streamState $streamState -spinIdx $spinIdx `
-                                                 -thinkingMsg "Reading my own code, Daddy..." -notice ""
-                                    $spinIdx++
-                                    Start-Sleep -Milliseconds 70
-                                }
-
-                                if ($cancelled) {
-                                    Dispose-StreamState $streamState
-                                    $streamState = $null
-                                    $notice = "improve cancelled"
-                                    if ($script:TuiForceExit) { $running = $false }
-                                } else {
-                                    $final = (Get-StreamFullText $streamState).Trim()
-                                    if ($final) {
-                                        $messages = @($messages) + [pscustomobject]@{ role='assistant'; content=$final }
-                                    } else {
-                                        $messages = @($messages) + [pscustomobject]@{ role='system'; content=(Format-ApiError $streamState.Error) }
-                                    }
-                                    Dispose-StreamState $streamState
-                                    $streamState = $null
-                                    Save-History -messages $messages -max $script:Config.maxHistory
-                                }
-                            }
-                        }
-                        'model'   {
-                            if ($arg) {
-                                $script:Config.model = $arg
-                                Save-Config $script:Config
-                                $notice = "model -> $arg"
-                            } else {
-                                $models = @(
-                                    "gemini-3.8-flash"
-                                    "gemini-3.7-flash"
-                                    "gemini-3.6-flash"
-                                    "gemini-3.5-flash"
-                                    "gemini-3.5-flash-lite"
-                                    "gemini-3.1-flash-lite"
-                                    "gemini-2.5-flash"
-                                )
-                                $currentIdx = [array]::IndexOf($models, $script:Config.model)
-                                if ($currentIdx -lt 0) { $currentIdx = 4 }
-                                $chosen = Select-Menu -Title "Select model" -Options $models -DefaultIndex $currentIdx
-                                $script:NeedsFullClear = $true
-                                $script:NeedsFullPaint = $true
-                                if ($chosen) {
-                                    $script:Config.model = $chosen
-                                    Save-Config $script:Config
-                                    $notice = "model -> $chosen"
-                                }
-                            }
-                        }
-                        'search'  {
-                            $cfg = Load-Config
-                            $argLower = $arg.ToLower()
-                            if ($argLower -eq 'on' -or $argLower -eq 'true' -or $argLower -eq '1') {
-                                $cfg.enableSearch = $true
-                                Save-Config $cfg
-                                $script:Config = $cfg
-                                $notice = "search grounding ON"
-                            } elseif ($argLower -eq 'off' -or $argLower -eq 'false' -or $argLower -eq '0') {
-                                $cfg.enableSearch = $false
-                                Save-Config $cfg
-                                $script:Config = $cfg
-                                $notice = "search grounding OFF"
-                            } else {
-                                $state = if ($cfg.enableSearch) { "ON" } else { "OFF" }
-                                $notice = "search grounding is currently $state  (use /search on|off)"
-                            }
-                        }
-                        'update'  {
-                            if ($script:PendingUpdateVersion) {
-                                $applyUpdate = $true
-                                $running = $false
-                            } else {
-                                # Force apply even if check has not finished / no newer version known
-                                $applyUpdate = $true
-                                $running = $false
-                            }
-                        }
-                        default   { $notice = "unknown command: /$name  (try /help)" }
+                    $sr = Invoke-SlashCommand -Name $name -Arg $arg -Messages $messages
+                    if ($sr.Expand) {
+                        $inputBuffer = "/" + $sr.Expand
+                        $script:SlashMenuDismissed = $false
+                        $null = Enter-SlashExpand -ParentName $sr.Expand -ParentSelIndex 0
+                        $script:NeedsFullPaint = $true
+                        continue
                     }
+                    $messages = $sr.Messages
+                    $notice = $sr.Notice
+                    if ($sr.NeedsFullClear) { $script:NeedsFullClear = $true }
+                    $script:NeedsFullPaint = $true
+                    if ($sr.ApplyUpdate) { $applyUpdate = $true }
+                    if ($sr.Exit) { $running = $false }
                     continue
                 }
 
@@ -2700,18 +3231,60 @@ function script:Run-TUI {
                 }
                 Save-History -messages $messages -max $script:Config.maxHistory
                 continue
+            } elseif ($key.Key -eq "RightArrow") {
+                $script:EscArmUntil = $null
+                if ($script:SlashExpand) {
+                    $script:NeedsFullPaint = $true
+                    continue
+                }
+                if (Test-SlashMenuOpen -Buffer $inputBuffer) {
+                    $sm = @(Get-SlashMatches -Buffer $inputBuffer)
+                    if ($sm.Count -gt 0) {
+                        Sync-SlashSelection -Matches $sm
+                        $sel = $sm[$script:SlashSelIndex]
+                        if (Test-SlashExpandable -Item $sel) {
+                            $inputBuffer = "/" + $sel.Name
+                            $script:SlashMenuDismissed = $false
+                            $null = Enter-SlashExpand -ParentName $sel.Name -ParentSelIndex $script:SlashSelIndex
+                            $script:NeedsFullPaint = $true
+                        }
+                    }
+                    continue
+                }
+            } elseif ($key.Key -eq "LeftArrow") {
+                $script:EscArmUntil = $null
+                if ($script:SlashExpand) {
+                    Exit-SlashExpand
+                    $script:NeedsFullPaint = $true
+                    continue
+                }
             } elseif ($key.Key -eq "Backspace") {
                 $script:EscArmUntil = $null
+                if ($script:SlashExpand) {
+                    Exit-SlashExpand
+                    $script:NeedsFullPaint = $true
+                    continue
+                }
                 if ($inputBuffer.Length -gt 0) {
                     $inputBuffer = $inputBuffer.Substring(0, $inputBuffer.Length - 1)
                     $script:SlashMenuDismissed = $false
+                    Clear-SlashExpand
                     $script:InPromptHistory = $false
                     $script:NeedsFullPaint = $true
                 }
             } elseif ($key.Key -eq "UpArrow") {
                 $script:EscArmUntil = $null
+                if ($script:SlashExpand) {
+                    $n = @($script:SlashExpand.Options).Count
+                    if ($n -gt 0) {
+                        $script:SlashExpand.SelIndex = ([int]$script:SlashExpand.SelIndex - 1 + $n) % $n
+                        $script:NeedsFullPaint = $true
+                    }
+                    continue
+                }
                 if (Test-SlashMenuOpen -Buffer $inputBuffer) {
                     $sm = @(Get-SlashMatches -Buffer $inputBuffer)
+                    if ($sm.Count -eq 0) { $script:NeedsFullPaint = $true; continue }
                     Sync-SlashSelection -Matches $sm
                     $script:SlashSelIndex = ($script:SlashSelIndex - 1 + $sm.Count) % $sm.Count
                     $script:NeedsFullPaint = $true
@@ -2737,8 +3310,17 @@ function script:Run-TUI {
                 }
             } elseif ($key.Key -eq "DownArrow") {
                 $script:EscArmUntil = $null
+                if ($script:SlashExpand) {
+                    $n = @($script:SlashExpand.Options).Count
+                    if ($n -gt 0) {
+                        $script:SlashExpand.SelIndex = ([int]$script:SlashExpand.SelIndex + 1) % $n
+                        $script:NeedsFullPaint = $true
+                    }
+                    continue
+                }
                 if (Test-SlashMenuOpen -Buffer $inputBuffer) {
                     $sm = @(Get-SlashMatches -Buffer $inputBuffer)
+                    if ($sm.Count -eq 0) { $script:NeedsFullPaint = $true; continue }
                     Sync-SlashSelection -Matches $sm
                     $script:SlashSelIndex = ($script:SlashSelIndex + 1) % $sm.Count
                     $script:NeedsFullPaint = $true
@@ -2806,6 +3388,7 @@ function script:Run-TUI {
                 }
                 $ch = $key.KeyChar
                 if (-not [char]::IsControl($ch) -and $ch -ne [char]0) {
+                    if ($script:SlashExpand) { Clear-SlashExpand }
                     $inputBuffer += $ch
                     $script:SlashMenuDismissed = $false
                     $script:InPromptHistory = $false
@@ -2836,11 +3419,12 @@ Nautilus commands (type / in the prompt for autocomplete):
   /new       New chat (clear history + soft reset)
   /clear     Clear conversation history
   /copy      Copy last assistant reply (clipboard or ~/.nautilus/last-copy.txt)
+  /copycode  Copy a fenced code block from recent replies (/cc); picker if many
   /export    Export transcript to ~/.nautilus/exports/ (optional path)
-  /theme     List themes  |  /theme <name>  to switch
+  /theme     Change theme (Right expands list in / menu)  |  /theme <name>
   /config    Show configuration
-  /model     /model <name>  set the Gemini model
-  /search    /search on|off  toggle Google Search grounding
+  /model     Choose model (Right expands in / menu)  |  /model <name>
+  /search    Toggle web search (Right expands on|off)  |  /search on|off
   /improve   /improve <request>  ask me to improve my own code
   /update    Apply update from GitHub Pages (same as Ctrl+U when pending)
   /exit      Close Nautilus  (or double-Esc)
@@ -2853,6 +3437,8 @@ Keys:
   /          Open slash-command autocomplete dropdown
   ?          Open shortcuts cheatsheet (when prompt is empty)
   Ctrl+K     Command palette (slash actions)
+  Ctrl+Shift+C  Copy code block from reply (Ctrl+Alt+C fallback)
+  Right/Left In / menu: expand theme·model·search / collapse
   Ctrl+.     Open / close shortcuts cheatsheet
   Ctrl+U     Apply pending in-TUI update (when tip is shown)
   Up/Down    Prompt history when empty; slash menu when open; else scroll chat

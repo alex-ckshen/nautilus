@@ -1,3 +1,26 @@
+# 0.4.2.0
+
+## Copy code fences
+- **`/copycode`** (`/cc`) + **Ctrl+Shift+C** (Ctrl+Alt+C fallback): copy markdown fenced code from recent assistant replies.
+- One fence → copy immediately; multiple → Select-Menu picker (`1  powershell  Get-Process...`).
+- Shared **`Copy-TextToClipboard`** (Set-Clipboard → clip.exe → `~/.nautilus/last-copy.txt`); `/copy` still copies the whole last reply.
+- Soft idle hint `Ctrl+Shift+C copy code` when recent replies contain fences.
+- SystemPrompt teaches the model to emit language-tagged fences (one clear fence per snippet; prose outside).
+
+## Slash UX polish (friction removed)
+- Action-oriented catalog descriptions; aliases (`cc`, `quit`, `keys`) without duplicate rows.
+- Filter ranking: **exact → prefix → substring → description** (typing `code` finds `copycode`).
+- Empty filter state: centered “no commands match /xyz” instead of a silent blank.
+- Wider `/` modal; aliases shown as `/copycode|/cc`; expandable rows show `>`.
+- Footer clarifies **tab fill / enter run / right expand / esc dismiss**.
+- **Right arrow** drills into **theme / model / search** options inline (Grok-style); **Left** / Esc collapses one level; Enter on a leaf applies.
+- Ctrl+K on theme/model/search opens the same inline expand (no second centered Select-Menu hop).
+- Unified **`Invoke-SlashCommand`** for Enter + palette (no dual-switch drift).
+- Soft confirm only for destructive **`/new`** / **`/clear`** when history is non-empty (default Cancel).
+- Bare `/search` expands on|off; `/search on|off` still works.
+
+Proxy / gist / Gemini wiring untouched. UTF-8 BOM on `.psm1`/`.psd1`; `install.ps1` unchanged.
+
 # 0.4.1.3
 
 - **Fix self-update breaking `nautilus` / `naut`** on Windows PowerShell 5.1: `Run-Update` no longer `Import-Module -Force`s itself in-process (that left exported `nautilus` alive while private `Run-TUI` vanished → `CommandNotFoundException: Run-TUI`).

@@ -52,7 +52,9 @@ nautilus help            # full command list
 
 - Type a message and press **Enter** to chat with Nautilus (streaming responses).
 - Complete **ASCII prompt box** (top / `>` / bottom) with a contextual shortcut hint strip above it.
-- Type **`/`** for slash-command autocomplete (large centered modal). Commands: `/help`, `/new`, `/clear`, `/copy`, `/export`, `/config`, `/theme`, `/model`, `/search on|off`, `/improve`, `/update`, `/exit`.
+- Type **`/`** for slash-command autocomplete (large centered modal). Commands: `/help`, `/new`, `/clear`, `/copy`, `/copycode` (`/cc`), `/export`, `/config`, `/theme`, `/model`, `/search`, `/improve`, `/update`, `/exit`.
+- **Right/Left** in the `/` menu expands/collapses **theme · model · search** options inline (no extra Select-Menu hop).
+- **Ctrl+Shift+C** (or `/copycode`) copies a fenced code block from recent replies; `/copy` still copies the whole last reply.
 - **Ctrl+K** opens the command palette; **Ctrl+U** applies a pending update tip.
 - **Esc** cancels an in-flight request; press **Esc again within ~2s** to quit (toast confirms).
 - **?** (empty prompt) or **Ctrl+.** opens the shortcuts cheatsheet modal.
@@ -62,6 +64,7 @@ nautilus help            # full command list
 - Smoother TUI paint in **0.4.0.1** (batched ANSI, no per-frame full clear, idle chrome-only refresh).
 - **0.4.0.2**: removed bottom model/theme/connection status footer; 2-line prompt; grouped `/` slash popup by category.
 - **0.4.1.3**: restored closed 3-line prompt frame; ASCII-safe chrome/separators for Big5 consoles; larger centered `/` modal.
+- **0.4.2.0**: `/copycode` + Ctrl+Shift+C; Right/Left expand for theme/model/search; slash ranking, empty-state, unified dispatch.
 
 ## Themes
 
@@ -82,7 +85,7 @@ nautilus theme Cyber
 - Local config at `~/.nautilus/config.json`, history at `~/.nautilus/history.json`.
 - Virtual Terminal processing is enabled in-process on Windows PowerShell 5.1.
 - Thinking spinner (Grok-Build inspired polish); connection flavour lives in the title bar / startup only.
-- ASCII box chrome (Big5-safe), grouped centered slash modal, command palette, prompt history, multiline input, smoother frame paint, retuned dark palettes (0.4.0.1-0.4.1.3).
+- ASCII box chrome (Big5-safe), grouped centered slash modal, command palette, prompt history, multiline input, smoother frame paint, retuned dark palettes (0.4.0.1-0.4.2.0).
 
 ## Repository layout
 
