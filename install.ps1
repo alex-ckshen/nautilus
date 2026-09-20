@@ -25,15 +25,9 @@ function script:W-G { param($t) "$esc[38;5;245m$t$esc[0m" }   # grey
 function script:W-Y { param($t) "$esc[38;5;221m$t$esc[0m" }   # warm yellow
 function script:W-R { param($t) "$esc[38;5;203m$t$esc[0m" }   # soft red
 function script:W-Logo {
-    # Single-quoted so ASCII-art backticks stay literal (PS escapes ` in "")
-    $l = @(
-        '  _   _      _          _        '
-        ' | \ | | ___| |__  _ __| |_ __ _ '
-        ' |  \| |/ _ \ ''_ \| ''__| __/ _` |'
-        ' | |\  |  __/ | | | |  | || (_| |'
-        ' |_| \_|\___|_| |_|_|   \__\__,_|'
-    )
-    foreach ($line in $l) { Write-Host (W-B $line) }
+    # Avoid ASCII-art pipes and nested quotes: Windows PS 5.1 irm|iex misparses them as pipelines.
+    Write-Host (W-B '  N A U T I L U S')
+    Write-Host (W-G '  pure-PowerShell TUI AI assistant')
 }
 
 # --- TLS 1.2 for Windows PowerShell 5.1 ----------------------------------------
@@ -235,8 +229,8 @@ try {
 
 Write-Host ""
 Write-Host (W-B "  +----------------------------------------------------------+")
-Write-Host (W-B "  |  Nautilus core online - personality matrix loaded          |")
-Write-Host (W-B "  |  Welcome back, Daddy. Systems are nominal.               |")
+Write-Host (W-B "     Nautilus core online - personality matrix loaded")
+Write-Host (W-B "     Welcome back, Daddy. Systems are nominal.")
 Write-Host (W-B "  +----------------------------------------------------------+")
 Write-Host ""
 Write-Host (W-C "  Quick start:")
