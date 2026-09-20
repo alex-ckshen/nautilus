@@ -1,4 +1,24 @@
-﻿# 0.3.44.1
+# 0.3.46.0
+
+- **Rounded chrome** (Grok Build prompt_widget): script `Box` glyphs `U+256D/256E/2570/256F` + `U+2500/2502`, `BoxAscii` fallback `+ - |`. `UseRoundedBorders` defaults **true**. `Select-Menu` uses rounded box; `Render-Frame` input is a compact **3-line rounded prompt** (top rule, middle `> ` line, bottom caption with model/theme or update tip).
+- **Contextual shortcut hints**: idle strip `enter send / commands ? keys esc quit`; streaming `esc cancel`. **Double-Esc quit** — first Esc arms toast `press esc again to quit` (~2s); second Esc quits. Small toast painted by `Render-Frame`.
+- **Shortcuts cheatsheet**: `?` (empty prompt) or **Ctrl+.** opens centered rounded modal of keybindings (aligned with `/help`); Esc / `?` / Ctrl+. closes.
+- **Mouse best-effort**: `Enter-TUI` enables VT mouse `?1000h` / `?1006h` (disabled on exit / Ctrl+C). SGR parse for wheel scroll (chat + menus) and menu row click. Chat click left as clear region stub — full hit-testing is fragile on PS 5.1 / some hosts; see note below.
+- Spinner remains ASCII `| / - \`. UTF-8 BOM preserved. Proxy / gist / Gemini endpoints unchanged.
+
+### Mouse limits (PS 5.1)
+- Relies on terminal VT mouse reporting; conhost/Windows Terminal usually work, ISE does not.
+- `[Console]::ReadKey` + ESC-drain SGR parse is best-effort — rapid motion / drag not handled.
+- No clipboard selection or click-to-focus in chat yet (stub only).
+
+# 0.3.45.0
+
+- **In-TUI update tip** (Grok Build–inspired): best-effort background check of remote `Nautilus.psd1` `ModuleVersion` vs local; when newer, show centered status tip `Update: vX available, press ctrl+u to restart` (“Update:” bold/accent).
+- **Ctrl+U** applies pending update (priority over any line-edit use): leave alt-screen → `Run-Update` → print “Updated to vX — run nautilus again”. Optional `/update` slash command uses the same path.
+- **Select-Menu** polish: centered floating ASCII box (`+--+` / `|`), title row, `>` highlight, footer `up/down  enter  esc`; absolute-coord redraw; ASCII `...` only.
+- Cleaner input prompt (`> ` ASCII-safe). Spinner remains ASCII `| / - \`. UTF-8 BOM preserved for PS 5.1.
+
+# 0.3.44.1
 
 - **Critical:** ship PowerShell files as **UTF-8 with BOM** so Windows PowerShell 5.1 (e.g. zh-TW CP950) can parse the module. Without BOM, spinner glyphs corrupted and `Import-Module` failed — `nautilus` not found after install.
 - Replace braille spinner with ASCII `| / - \`.

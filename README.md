@@ -1,4 +1,4 @@
-# Nautilus
+﻿# Nautilus
 
 A pure-PowerShell, futuristic TUI AI assistant with J.A.R.V.I.S. energy.
 Runs entirely inside your terminal — blue sci-fi aesthetic, streaming Gemini
@@ -51,9 +51,13 @@ nautilus help            # full command list
 ### Inside the TUI
 
 - Type a message and press **Enter** to chat with Nautilus (streaming responses).
-- Slash commands: `/help`, `/clear`, `/config`, `/theme`, `/model`, `/search on|off`, `/improve`, `/exit`.
-- **Esc** to exit (also cancels an in-flight request).
-- **Up/Down** or **PgUp/PgDn** to scroll history; **Home/End** jump.
+- Compact **rounded prompt box** (Grok-style) with model/theme caption and a contextual shortcut hint strip.
+- Slash commands: `/help`, `/clear`, `/config`, `/theme`, `/model`, `/search on|off`, `/improve`, `/update`, `/exit`.
+- When a newer version is available, a subtle tip appears — press **Ctrl+U** (or `/update`) to apply it.
+- **Esc** cancels an in-flight request; press **Esc again within ~2s** to quit (toast confirms).
+- **?** (empty prompt) or **Ctrl+.** opens the shortcuts cheatsheet modal.
+- **Up/Down** or **PgUp/PgDn** to scroll history; **Home/End** jump; mouse **wheel** scrolls when the terminal supports it.
+- Menu pickers (`/theme`, `/model`) support arrows, Enter, Esc, and best-effort **click**.
 - Backspace and printable keys edit the input line.
 
 ## Themes
@@ -75,6 +79,7 @@ nautilus theme Cyber
 - Local config at `~/.nautilus/config.json`, history at `~/.nautilus/history.json`.
 - Virtual Terminal processing is enabled in-process on Windows PowerShell 5.1.
 - Thinking spinner + rotating status lines (Grok-Build inspired polish).
+- Rounded box chrome, shortcut hints / cheatsheet, double-Esc quit, best-effort VT mouse (0.3.46+).
 
 ## Repository layout
 

@@ -2,15 +2,23 @@
     Nautilus - a pure-PowerShell futuristic TUI AI assistant.
     JARVIS-style personality, Gemini-powered, blue sci-fi aesthetic.
     Public command: nautilus  (alias: naut)
-    Version: 0.3.44.1
+    Version: 0.3.46.0
 #>
 
-$script:NautilusVersion = "0.3.44.1"
+$script:NautilusVersion = "0.3.46.0"
 $script:TuiActive = $false
 $script:TuiForceExit = $false
 $script:CancelHandlerRegistered = $false
 $script:LastMaxStart = 0
 $script:StatusIdx = 0
+$script:PendingUpdateVersion = $null
+$script:_UpdateCheckState = $null
+$script:UseRoundedBorders = $true
+$script:ToastText = $null
+$script:ToastUntil = $null
+$script:EscArmUntil = $null
+$script:MouseEnabled = $false
+$script:MenuHitRows = @()   # Select-Menu click targets: @{ Row = n; Index = i }
 
 # ===========================================================================
 #  PRIVATE CONFIG
@@ -169,6 +177,48 @@ function script:Bold { param([string]$t, [int]$code) "$script:Esc[1;38;5;${code}
 function script:Dim  { param([string]$t) "$script:Esc[2;38;5;240m$t$script:Esc[0m" }
 
 # ===========================================================================
+#  BOX CHROME  (Grok Build–style rounded borders + ASCII fallback)
+# ===========================================================================
+# Rounded: U+256D/256E/2570/256F corners, U+2500/2502 lines (╭─╮│╰─╯)
+$script:Box = @{
+    TL = [string][char]0x256D
+    TR = [string][char]0x256E
+    BL = [string][char]0x2570
+    BR = [string][char]0x256F
+    H  = [string][char]0x2500
+    V  = [string][char]0x2502
+}
+$script:BoxAscii = @{
+    TL = '+'
+    TR = '+'
+    BL = '+'
+    BR = '+'
+    H  = '-'
+    V  = '|'
+}
+function script:Get-Box {
+    if ($script:UseRoundedBorders) { return $script:Box }
+    return $script:BoxAscii
+}
+
+function script:Set-Toast {
+    param([string]$Text, [int]$Ms = 2000)
+    $script:ToastText = $Text
+    $script:ToastUntil = [datetime]::UtcNow.AddMilliseconds($Ms)
+}
+function script:Clear-ToastIfExpired {
+    if ($script:ToastUntil -and [datetime]::UtcNow -ge $script:ToastUntil) {
+        $script:ToastText = $null
+        $script:ToastUntil = $null
+    }
+}
+function script:Clear-EscArmIfExpired {
+    if ($script:EscArmUntil -and [datetime]::UtcNow -ge $script:EscArmUntil) {
+        $script:EscArmUntil = $null
+    }
+}
+
+# ===========================================================================
 #  ARROW-KEY SELECT MENU  (Grok-Build style)
 # ===========================================================================
 function script:Select-Menu {
@@ -191,6 +241,7 @@ function script:Select-Menu {
     $idx = [Math]::Max(0, [Math]::Min($DefaultIndex, $Options.Count - 1))
     $th  = if ($script:CurrentTheme) { $script:CurrentTheme } else { $script:Themes["Nautilus"] }
     $esc = $script:Esc
+    $box = Get-Box
 
     $prevCursor = $true
     try { $prevCursor = [Console]::CursorVisible } catch { $prevCursor = $true }
@@ -208,12 +259,23 @@ function script:Select-Menu {
             if ($w -lt 20) { $w = 20 }
             if ($h -lt 8)  { $h = 8 }
 
-            # Clamp visible options to window (keep title + hint rows)
-            $maxVisible = [Math]::Max(1, $h - 6)
-            $boxHeight  = [Math]::Min($Options.Count, $maxVisible) + 5
+            $titleText = if ($Title) { $Title } else { "Select" }
+            $footerHint = "up/down  enter  esc  click"
+
+            $contentW = [Math]::Max($titleText.Length, $footerHint.Length)
+            foreach ($o in $Options) {
+                $ol = ([string]$o).Length + 2
+                if ($ol -gt $contentW) { $contentW = $ol }
+            }
+            $innerW = [Math]::Max(24, [Math]::Min($contentW + 2, $w - 6))
+            $boxW   = $innerW + 2
+
+            $maxVisible = [Math]::Max(1, $h - 8)
+            $visCount   = [Math]::Min($Options.Count, $maxVisible)
+            $boxHeight  = $visCount + 6
             $startRow   = [Math]::Max(1, [int](($h - $boxHeight) / 2))
-            $startCol   = 2
-            if ($startCol + 10 -gt $w) { $startCol = 1 }
+            $startCol   = [Math]::Max(1, [int](($w - $boxW) / 2) + 1)
+            if ($startCol + $boxW - 1 -gt $w) { $startCol = [Math]::Max(1, $w - $boxW) }
 
             $viewTop = 0
             if ($Options.Count -gt $maxVisible) {
@@ -221,55 +283,89 @@ function script:Select-Menu {
             }
             $viewEnd = [Math]::Min($Options.Count, $viewTop + $maxVisible)
 
-            # Clear fixed region only (absolute coords — never stacks)
             $clearW = [Math]::Max(0, $w - 1)
             for ($r = $startRow; $r -lt ($startRow + $boxHeight + 1); $r++) {
                 if ($r -gt $h) { break }
                 Write-Host ("$esc[$r;1H" + (" " * $clearW)) -NoNewline
             }
 
+            $hLine = $box.H * $innerW
             $row = $startRow
-            $titleText = if ($Title) { $Title } else { "Select" }
-            Write-Host ("$esc[$row;${startCol}H" + (Themed $titleText 'bright')) -NoNewline
-            $row++
-            Write-Host ("$esc[$row;${startCol}H") -NoNewline
+            Write-Host ("$esc[$row;${startCol}H" + (Themed ($box.TL + $hLine + $box.TR) 'border')) -NoNewline
             $row++
 
+            $titlePad = $innerW - 1 - $titleText.Length
+            if ($titlePad -lt 0) { $titlePad = 0 }
+            $titleShown = $titleText
+            if ($titleShown.Length -gt ($innerW - 1)) {
+                $titleShown = $titleShown.Substring(0, [Math]::Max(1, $innerW - 4)) + "..."
+                $titlePad = $innerW - 1 - $titleShown.Length
+            }
+            Write-Host ("$esc[$row;${startCol}H" + (Themed $box.V 'border') + (Bold (" " + $titleShown) $th.bright) + (" " * $titlePad) + (Themed $box.V 'border')) -NoNewline
+            $row++
+
+            Write-Host ("$esc[$row;${startCol}H" + (Themed ($box.V + (" " * $innerW) + $box.V) 'border')) -NoNewline
+            $row++
+
+            $script:MenuHitRows = @()
             for ($i = $viewTop; $i -lt $viewEnd; $i++) {
-                $label = $Options[$i]
-                $maxLabel = [Math]::Max(8, $w - $startCol - 6)
-                if ($label.Length -gt $maxLabel) { $label = $label.Substring(0, $maxLabel - 1) + [char]0x2026 }
+                $label = [string]$Options[$i]
+                $maxLabel = [Math]::Max(1, $innerW - 3)
+                if ($label.Length -gt $maxLabel) { $label = $label.Substring(0, $maxLabel - 3) + "..." }
                 if ($i -eq $idx) {
-                    $line = (Themed "  > " 'accent') + (Bold $label $th.accent)
+                    $body = "> " + $label
+                    $pad = $innerW - $body.Length
+                    if ($pad -lt 0) { $pad = 0 }
+                    $line = (Themed $box.V 'border') + (Themed $body 'accent') + (" " * $pad) + (Themed $box.V 'border')
                 } else {
-                    $line = (Themed "    $label" 'dim')
+                    $body = "  " + $label
+                    $pad = $innerW - $body.Length
+                    if ($pad -lt 0) { $pad = 0 }
+                    $line = (Themed $box.V 'border') + (Themed $body 'dim') + (" " * $pad) + (Themed $box.V 'border')
                 }
                 Write-Host ("$esc[$row;${startCol}H$line") -NoNewline
+                $script:MenuHitRows += @{ Row = $row; Index = $i; Col = $startCol; Width = $boxW }
                 $row++
             }
 
+            Write-Host ("$esc[$row;${startCol}H" + (Themed ($box.V + (" " * $innerW) + $box.V) 'border')) -NoNewline
             $row++
-            if ($row -le $h) {
-                Write-Host ("$esc[$row;${startCol}H" + (Dim "Up/Down move   Enter select   Esc cancel")) -NoNewline
-            }
 
-            try {
-                $key = [Console]::ReadKey($true)
-            } catch {
-                return $null
-            }
+            $footPad = $innerW - 1 - $footerHint.Length
+            if ($footPad -lt 0) { $footPad = 0 }
+            Write-Host ("$esc[$row;${startCol}H" + (Themed $box.V 'border') + (Dim (" " + $footerHint)) + (" " * $footPad) + (Themed $box.V 'border')) -NoNewline
+            $row++
+
+            Write-Host ("$esc[$row;${startCol}H" + (Themed ($box.BL + $hLine + $box.BR) 'border')) -NoNewline
+
+            $ev = Read-TuiEvent -WaitMs 60000
+            if (-not $ev) { continue }
 
             $done = $false
-            switch ($key.Key) {
-                "UpArrow"   { $idx = ($idx - 1 + $Options.Count) % $Options.Count }
-                "DownArrow" { $idx = ($idx + 1) % $Options.Count }
-                "Home"      { $idx = 0 }
-                "End"       { $idx = $Options.Count - 1 }
-                "Enter"     { $result = $Options[$idx]; $done = $true }
-                "Escape"    { $result = $null; $done = $true }
-                default {
-                    if ($key.KeyChar -eq [char]13) { $result = $Options[$idx]; $done = $true }
-                    elseif ($key.KeyChar -eq [char]27) { $result = $null; $done = $true }
+            if ($ev.Kind -eq 'MouseWheel') {
+                if ($ev.Delta -gt 0) { $idx = ($idx - 1 + $Options.Count) % $Options.Count }
+                else { $idx = ($idx + 1) % $Options.Count }
+            } elseif ($ev.Kind -eq 'MouseClick') {
+                foreach ($hit in @($script:MenuHitRows)) {
+                    if ($ev.Row -eq $hit.Row -and $ev.Col -ge $hit.Col -and $ev.Col -lt ($hit.Col + $hit.Width)) {
+                        $result = $Options[$hit.Index]
+                        $done = $true
+                        break
+                    }
+                }
+            } elseif ($ev.Kind -eq 'Key') {
+                $key = $ev.Key
+                switch ($key.Key) {
+                    "UpArrow"   { $idx = ($idx - 1 + $Options.Count) % $Options.Count }
+                    "DownArrow" { $idx = ($idx + 1) % $Options.Count }
+                    "Home"      { $idx = 0 }
+                    "End"       { $idx = $Options.Count - 1 }
+                    "Enter"     { $result = $Options[$idx]; $done = $true }
+                    "Escape"    { $result = $null; $done = $true }
+                    default {
+                        if ($key.KeyChar -eq [char]13) { $result = $Options[$idx]; $done = $true }
+                        elseif ($key.KeyChar -eq [char]27) { $result = $null; $done = $true }
+                    }
                 }
             }
             if ($done) { break }
@@ -281,14 +377,15 @@ function script:Select-Menu {
             $h = [Console]::WindowHeight
         } catch { $w = 80; $h = 24 }
         $clearW = [Math]::Max(0, $w - 1)
-        $boxHeight = [Math]::Min($Options.Count, [Math]::Max(1, $h - 6)) + 5
+        $maxVisible = [Math]::Max(1, $h - 8)
+        $boxHeight = [Math]::Min($Options.Count, $maxVisible) + 6
         $startRow  = [Math]::Max(1, [int](($h - $boxHeight) / 2))
         for ($r = $startRow; $r -lt ($startRow + $boxHeight + 1); $r++) {
             if ($r -gt $h) { break }
             try { Write-Host ("$esc[$r;1H" + (" " * $clearW)) -NoNewline } catch { }
         }
-        # Restore prior cursor visibility (TUI keeps it hidden)
         try { [Console]::CursorVisible = $prevCursor } catch { }
+        $script:MenuHitRows = @()
     }
     return $result
 }
@@ -793,18 +890,409 @@ function script:Test-NautilusHost {
     }
 }
 
+# ===========================================================================
+#  BACKGROUND UPDATE CHECK (best-effort, never blocks / crashes TUI)
+# ===========================================================================
+function script:Compare-ModuleVersion {
+    param([string]$Left, [string]$Right)
+    try {
+        $a = [version](($Left  -replace '[^0-9.]', ''))
+        $b = [version](($Right -replace '[^0-9.]', ''))
+        return $a.CompareTo($b)
+    } catch {
+        return 0
+    }
+}
+
+function script:Start-UpdateCheck {
+    $script:PendingUpdateVersion = $null
+    $script:_UpdateCheckState = $null
+    try {
+        $url = "$script:RepoBase/Nautilus/Nautilus.psd1"
+        $local = $script:NautilusVersion
+        $state = [hashtable]::Synchronized(@{
+            Done   = $false
+            Remote = $null
+            Error  = $null
+        })
+        $scriptBlock = {
+            param($Url, $State)
+            try {
+                try {
+                    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
+                } catch { }
+                $text = $null
+                $curlPath = $null
+                foreach ($candidate in @('curl.exe', 'curl', '/usr/bin/curl', '/bin/curl')) {
+                    $isPath = ($candidate.IndexOf([char]'/') -ge 0) -or ($candidate.IndexOf([char]'\') -ge 0)
+                    if ($isPath) {
+                        if (Test-Path -LiteralPath $candidate) { $curlPath = $candidate; break }
+                    } else {
+                        $c = Get-Command -Name $candidate -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+                        if ($c) { $curlPath = $c.Source; break }
+                    }
+                }
+                if ($curlPath) {
+                    try {
+                        $tmp = [System.IO.Path]::GetTempFileName()
+                        $p = Start-Process -FilePath $curlPath -ArgumentList @('-fsSL','--max-time','4','--retry','1','-o',$tmp,'--',$Url) -Wait -PassThru -NoNewWindow
+                        if ($p.ExitCode -eq 0 -and (Test-Path -LiteralPath $tmp)) {
+                            $text = [System.IO.File]::ReadAllText($tmp)
+                        }
+                        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+                    } catch { }
+                }
+                if (-not $text) {
+                    try {
+                        Add-Type -AssemblyName System.Net.Http -ErrorAction SilentlyContinue
+                        $client = New-Object System.Net.Http.HttpClient
+                        $client.Timeout = [TimeSpan]::FromSeconds(4)
+                        $resp = $client.GetAsync($Url).GetAwaiter().GetResult()
+                        if ($resp.IsSuccessStatusCode) {
+                            $text = $resp.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+                        }
+                        $client.Dispose()
+                    } catch { }
+                }
+                if ($text -match "ModuleVersion\s*=\s*'([^']+)'") {
+                    $State.Remote = $Matches[1]
+                } elseif ($text -match 'ModuleVersion\s*=\s*"([^"]+)"') {
+                    $State.Remote = $Matches[1]
+                }
+            } catch {
+                $State.Error = $_.Exception.Message
+            } finally {
+                $State.Done = $true
+            }
+        }
+        $rs = [runspacefactory]::CreateRunspace()
+        $rs.Open()
+        $ps2 = [powershell]::Create()
+        $ps2.Runspace = $rs
+        [void]$ps2.AddScript($scriptBlock)
+        [void]$ps2.AddArgument($url)
+        [void]$ps2.AddArgument($state)
+        $handle = $ps2.BeginInvoke()
+        $script:_UpdateCheckState = @{
+            State  = $state
+            Local  = $local
+            PS     = $ps2
+            RS     = $rs
+            Handle = $handle
+        }
+    } catch {
+        $script:_UpdateCheckState = $null
+    }
+}
+
+function script:Poll-UpdateCheck {
+    $ucs = $script:_UpdateCheckState
+    if (-not $ucs) { return }
+    $st = $ucs.State
+    if (-not $st) { $script:_UpdateCheckState = $null; return }
+    if (-not $st.Done) { return }
+    try {
+        if ($st.Remote) {
+            if ((Compare-ModuleVersion -Left $st.Remote -Right $ucs.Local) -gt 0) {
+                $script:PendingUpdateVersion = [string]$st.Remote
+            }
+        }
+    } catch { }
+    try {
+        if ($ucs.Handle -and $ucs.PS) {
+            try { $ucs.PS.EndInvoke($ucs.Handle) } catch { }
+        }
+    } catch { }
+    try { if ($ucs.PS) { $ucs.PS.Dispose() } } catch { }
+    try {
+        if ($ucs.RS) { $ucs.RS.Close(); $ucs.RS.Dispose() }
+    } catch { }
+    $script:_UpdateCheckState = $null
+}
+
+function script:Stop-UpdateCheck {
+    $ucs = $script:_UpdateCheckState
+    if (-not $ucs) { return }
+    try {
+        if ($ucs.PS -and $ucs.Handle -and -not $ucs.Handle.IsCompleted) {
+            try { $ucs.PS.Stop() } catch { }
+        }
+    } catch { }
+    try { if ($ucs.PS -and $ucs.Handle) { $ucs.PS.EndInvoke($ucs.Handle) } } catch { }
+    try { if ($ucs.PS) { $ucs.PS.Dispose() } } catch { }
+    try { if ($ucs.RS) { $ucs.RS.Close(); $ucs.RS.Dispose() } } catch { }
+    $script:_UpdateCheckState = $null
+}
+
+function script:Invoke-PendingUpdateApply {
+    # Leave TUI first (caller should Exit-TUI). Download then ask user to relaunch —
+    # in-process module reload mid-session is fragile on PS 5.1.
+    $esc = $script:Esc
+    $target = $script:PendingUpdateVersion
+    Write-Host ""
+    if ($target) {
+        Write-Host "$esc[38;5;81m  Applying update to v$target...$esc[0m"
+    } else {
+        Write-Host "$esc[38;5;81m  Applying update...$esc[0m"
+    }
+    try {
+        Run-Update
+    } catch {
+        Write-Host "$esc[38;5;203m  Update failed: $($_.Exception.Message)$esc[0m"
+        return
+    }
+    $script:PendingUpdateVersion = $null
+    $shown = $null
+    try {
+        $manifest = Join-Path $script:ModuleRoot "Nautilus.psd1"
+        if (Test-Path -LiteralPath $manifest) {
+            $raw = Get-Content -LiteralPath $manifest -Raw -ErrorAction SilentlyContinue
+            if ($raw -match "ModuleVersion\s*=\s*'([^']+)'") { $shown = $Matches[1] }
+            elseif ($raw -match 'ModuleVersion\s*=\s*"([^"]+)"') { $shown = $Matches[1] }
+        }
+    } catch { }
+    if (-not $shown) { $shown = $target }
+    if ($shown) {
+        Write-Host "$esc[38;5;117m  Updated to v$shown -- run nautilus again$esc[0m"
+    } else {
+        Write-Host "$esc[38;5;117m  Update finished -- run nautilus again$esc[0m"
+    }
+    Write-Host ""
+}
+
+
+# ===========================================================================
+#  MOUSE + INPUT EVENTS  (best-effort VT SGR / RawUI on PS 5.1)
+# ===========================================================================
+function script:Enable-Mouse {
+    # X11 mouse tracking + SGR extended coords (Grok: ?1000 / ?1006)
+    try {
+        Write-Host "$script:Esc[?1000h$script:Esc[?1006h" -NoNewline
+        $script:MouseEnabled = $true
+    } catch {
+        $script:MouseEnabled = $false
+    }
+}
+function script:Disable-Mouse {
+    try {
+        Write-Host "$script:Esc[?1000l$script:Esc[?1006l" -NoNewline
+    } catch { }
+    $script:MouseEnabled = $false
+}
+
+function script:Try-ParseSgrMouse {
+    # Drain pending KeyChars after ESC and parse CSI < btn ; col ; row M/m
+    # Returns hashtable Kind/Button/Col/Row/Pressed or $null
+    $buf = New-Object System.Text.StringBuilder
+    $deadline = [datetime]::UtcNow.AddMilliseconds(30)
+    while ([datetime]::UtcNow -lt $deadline) {
+        $avail = $false
+        try { $avail = [Console]::KeyAvailable } catch { $avail = $false }
+        if (-not $avail) {
+            Start-Sleep -Milliseconds 2
+            continue
+        }
+        try {
+            $k = [Console]::ReadKey($true)
+        } catch { break }
+        [void]$buf.Append($k.KeyChar)
+        $s = $buf.ToString()
+        # SGR: <b;x;yM or <b;x;ym   (CSI already consumed as ESC — next is '[')
+        if ($s -match '^\[<(\d+);(\d+);(\d+)([Mm])') {
+            $btn = [int]$Matches[1]
+            $col = [int]$Matches[2]
+            $row = [int]$Matches[3]
+            $pressed = ($Matches[4] -ceq 'M')
+            $kind = 'MouseClick'
+            $delta = 0
+            # wheel: 64 up, 65 down (bitfield in SGR)
+            if (($btn -band 64) -ne 0) {
+                $kind = 'MouseWheel'
+                if (($btn -band 1) -ne 0) { $delta = -1 } else { $delta = 1 }
+            }
+            return @{
+                Kind = $kind
+                Button = $btn
+                Col = $col
+                Row = $row
+                Pressed = $pressed
+                Delta = $delta
+            }
+        }
+        # give up if clearly not mouse (too long / wrong prefix)
+        if ($s.Length -gt 24) { return $null }
+        if ($s.Length -ge 1 -and $s[0] -ne '[' -and $s[0] -ne 'O') { return $null }
+    }
+    return $null
+}
+
+function script:Read-TuiEvent {
+    param([int]$WaitMs = 0)
+    # Returns @{ Kind='Key'; Key=ConsoleKeyInfo } | Mouse* | $null on timeout
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($true) {
+        $avail = $false
+        try { $avail = [Console]::KeyAvailable } catch { return $null }
+        if ($avail) {
+            try {
+                $key = [Console]::ReadKey($true)
+            } catch { return $null }
+
+            # Escape may start an SGR mouse sequence when mouse is enabled
+            if ($key.Key -eq 'Escape' -or $key.KeyChar -eq [char]27) {
+                $more = $false
+                try { $more = [Console]::KeyAvailable } catch { $more = $false }
+                if ($more -or $script:MouseEnabled) {
+                    $mouse = Try-ParseSgrMouse
+                    if ($mouse) {
+                        if ($mouse.Kind -eq 'MouseWheel') {
+                            return @{ Kind = 'MouseWheel'; Delta = $mouse.Delta; Col = $mouse.Col; Row = $mouse.Row; Key = $null }
+                        }
+                        if ($mouse.Kind -eq 'MouseClick' -and $mouse.Pressed) {
+                            return @{ Kind = 'MouseClick'; Col = $mouse.Col; Row = $mouse.Row; Button = $mouse.Button; Key = $null }
+                        }
+                        # release / other — ignore
+                        continue
+                    }
+                }
+                # plain Escape
+                return @{ Kind = 'Key'; Key = $key }
+            }
+            return @{ Kind = 'Key'; Key = $key }
+        }
+        if ($WaitMs -le 0) { return $null }
+        if ($sw.ElapsedMilliseconds -ge $WaitMs) { return $null }
+        Start-Sleep -Milliseconds 10
+    }
+}
+
+function script:Get-ShortcutRows {
+    return @(
+        @{ Keys = 'Enter';     Desc = 'Send message' }
+        @{ Keys = 'Esc';       Desc = 'Cancel stream / double-Esc quit' }
+        @{ Keys = '?';         Desc = 'Open this cheatsheet (empty prompt)' }
+        @{ Keys = 'Ctrl+.';    Desc = 'Open / close shortcuts cheatsheet' }
+        @{ Keys = 'Ctrl+U';    Desc = 'Apply pending update tip' }
+        @{ Keys = 'Up/Down';   Desc = 'Scroll chat history' }
+        @{ Keys = 'PgUp/PgDn'; Desc = 'Scroll chat by page' }
+        @{ Keys = 'Home/End';  Desc = 'Jump to top / bottom' }
+        @{ Keys = '/help';     Desc = 'Slash help (same bindings listed)' }
+        @{ Keys = '/theme';    Desc = 'Theme picker (arrows / click / Esc)' }
+        @{ Keys = '/model';    Desc = 'Model picker' }
+        @{ Keys = '/clear';    Desc = 'Wipe conversation history' }
+        @{ Keys = '/update';   Desc = 'Self-update from GitHub Pages' }
+        @{ Keys = '/exit';     Desc = 'Leave TUI' }
+        @{ Keys = 'Wheel';     Desc = 'Scroll chat or menu (best-effort)' }
+        @{ Keys = 'Click';     Desc = 'Select menu row (best-effort)' }
+    )
+}
+
+function script:Show-ShortcutsHelp {
+    # Centered rounded modal of keybindings; Esc / ? / Ctrl+. closes
+    $th  = if ($script:CurrentTheme) { $script:CurrentTheme } else { $script:Themes["Nautilus"] }
+    $esc = $script:Esc
+    $box = Get-Box
+    $rows = @(Get-ShortcutRows)
+
+    $prevCursor = $true
+    try { $prevCursor = [Console]::CursorVisible } catch { }
+    try { [Console]::CursorVisible = $false } catch { }
+
+    try {
+        while ($true) {
+            try { $w = [Console]::WindowWidth; $h = [Console]::WindowHeight } catch { $w = 80; $h = 24 }
+            if ($w -lt 30) { $w = 30 }
+            if ($h -lt 12) { $h = 12 }
+
+            $title = "Shortcuts"
+            $footer = "esc / ? / ctrl+.  close"
+            $innerW = [Math]::Min(56, $w - 6)
+            $innerW = [Math]::Max(36, $innerW)
+            $maxVis = [Math]::Max(4, $h - 10)
+            $vis = [Math]::Min($rows.Count, $maxVis)
+            $boxH = $vis + 5
+            $startRow = [Math]::Max(1, [int](($h - $boxH) / 2))
+            $startCol = [Math]::Max(1, [int](($w - ($innerW + 2)) / 2) + 1)
+
+            $clearW = [Math]::Max(0, $w - 1)
+            for ($r = $startRow; $r -lt ($startRow + $boxH + 1); $r++) {
+                if ($r -gt $h) { break }
+                Write-Host ("$esc[$r;1H" + (" " * $clearW)) -NoNewline
+            }
+
+            $hLine = $box.H * $innerW
+            $row = $startRow
+            Write-Host ("$esc[$row;${startCol}H" + (Themed ($box.TL + $hLine + $box.TR) 'border')) -NoNewline
+            $row++
+            $padT = $innerW - 1 - $title.Length
+            if ($padT -lt 0) { $padT = 0 }
+            Write-Host ("$esc[$row;${startCol}H" + (Themed $box.V 'border') + (Bold (" " + $title) $th.bright) + (" " * $padT) + (Themed $box.V 'border')) -NoNewline
+            $row++
+            Write-Host ("$esc[$row;${startCol}H" + (Themed ($box.V + (" " * $innerW) + $box.V) 'border')) -NoNewline
+            $row++
+
+            for ($i = 0; $i -lt $vis; $i++) {
+                $k = [string]$rows[$i].Keys
+                $d = [string]$rows[$i].Desc
+                $keyW = 12
+                if ($k.Length -gt $keyW) { $k = $k.Substring(0, $keyW) }
+                $left = " " + $k.PadRight($keyW) + " "
+                $rest = $innerW - $left.Length
+                if ($d.Length -gt $rest) { $d = $d.Substring(0, [Math]::Max(1, $rest - 3)) + "..." }
+                $body = $left + $d
+                $pad = $innerW - $body.Length
+                if ($pad -lt 0) { $pad = 0 }
+                $line = (Themed $box.V 'border') + (Themed $left 'accent') + (Dim $d) + (" " * $pad) + (Themed $box.V 'border')
+                Write-Host ("$esc[$row;${startCol}H$line") -NoNewline
+                $row++
+            }
+
+            Write-Host ("$esc[$row;${startCol}H" + (Themed ($box.V + (" " * $innerW) + $box.V) 'border')) -NoNewline
+            $row++
+            $fp = $innerW - 1 - $footer.Length
+            if ($fp -lt 0) { $fp = 0 }
+            Write-Host ("$esc[$row;${startCol}H" + (Themed $box.V 'border') + (Dim (" " + $footer)) + (" " * $fp) + (Themed $box.V 'border')) -NoNewline
+            $row++
+            Write-Host ("$esc[$row;${startCol}H" + (Themed ($box.BL + $hLine + $box.BR) 'border')) -NoNewline
+
+            $ev = Read-TuiEvent -WaitMs 60000
+            if (-not $ev) { continue }
+            if ($ev.Kind -eq 'Key') {
+                $key = $ev.Key
+                $isCtrlDot = (($key.Key -eq 'OemPeriod') -or ($key.KeyChar -eq '.')) -and (($key.Modifiers -band [ConsoleModifiers]::Control) -ne 0)
+                # Some hosts report Ctrl+. as KeyChar = [char]0 with Control+OemPeriod; also accept Ctrl+X as Grok alt — Nautilus uses Ctrl+. only
+                if ($key.Key -eq 'Escape' -or $key.KeyChar -eq '?' -or $isCtrlDot) { break }
+                if (($key.Key -eq 'Oem2' -or $key.KeyChar -eq '/') -and (($key.Modifiers -band [ConsoleModifiers]::Control) -ne 0)) { break }
+            } elseif ($ev.Kind -eq 'MouseClick') {
+                # click outside / anywhere closes (simple)
+                break
+            }
+        }
+    }
+    finally {
+        try { $w = [Console]::WindowWidth; $h = [Console]::WindowHeight } catch { $w = 80; $h = 24 }
+        $clearW = [Math]::Max(0, $w - 1)
+        for ($r = 1; $r -le $h; $r++) {
+            try { Write-Host ("$esc[$r;1H" + (" " * $clearW)) -NoNewline } catch { }
+        }
+        try { [Console]::CursorVisible = $prevCursor } catch { }
+    }
+}
+
 function script:Enter-TUI {
     try { [Console]::CursorVisible = $false } catch { }
     try {
         Write-Host "$script:Esc[?1049h" -NoNewline   # alternate screen
         Write-Host "$script:Esc[?25l" -NoNewline     # hide cursor
         Write-Host "$script:Esc[2J" -NoNewline       # clear
+        Enable-Mouse                                  # best-effort wheel / click
     } catch {
         throw "Failed to enter alternate screen. Use a real console host (Windows Terminal / conhost)."
     }
     $script:TuiActive = $true
 }
 function script:Exit-TUI {
+    try { Disable-Mouse } catch { }
     try {
         Write-Host "$script:Esc[?1049l" -NoNewline  # leave alternate screen
         Write-Host "$script:Esc[?25h" -NoNewline    # show cursor
@@ -823,7 +1311,7 @@ function script:Register-TuiCancelHandler {
             $e.Cancel = $true
             try {
                 $esc = [char]27
-                [Console]::Write("$esc[?1049l$esc[?25h$esc[0m")
+                [Console]::Write("$esc[?1000l$esc[?1006l$esc[?1049l$esc[?25h$esc[0m")
                 [Console]::CursorVisible = $true
             } catch { }
             $script:TuiActive = $false
@@ -867,8 +1355,12 @@ function script:Render-Frame {
         [string]$thinkingMsg,
         [string]$notice
     )
+    Clear-ToastIfExpired
+    Clear-EscArmIfExpired
+
     $th = $script:CurrentTheme
     if (-not $th) { $th = $script:Themes["Nautilus"] }
+    $box = Get-Box
     $w = [Console]::WindowWidth
     $h = [Console]::WindowHeight
     if ($w -lt 30 -or $h -lt 12) {
@@ -885,17 +1377,19 @@ function script:Render-Frame {
     if ($padConn -lt 0) { $padConn = 0 }
     $topLine = (Themed $titleBar 'bright') + (Themed (" " * $padConn) 'titlebar') + (Themed $conn 'accent') + (Themed $modelTag 'dim')
 
-    $borderTop = (Themed ([string]([char]0x2550) * $w) 'border')
-    $borderBot = $borderTop
+    $borderTop = (Themed ($box.H * [Math]::Max(1, $w)) 'border')
 
-    $inputRow = $h
-    $statusRow = $h - 1
+    # Layout: title, top rule, chat, hint/toast, 3-line rounded prompt
+    $hintRow   = $h - 3
+    $promptTop = $h - 2
+    $promptMid = $h - 1
+    $promptBot = $h
     $chatTop = 3
-    $chatBottom = $h - 3
+    $chatBottom = $h - 4
+    if ($chatBottom -lt $chatTop) { $chatBottom = $chatTop }
     $chatHeight = $chatBottom - $chatTop + 1
     $chatWidth = $w - 2
 
-    # Build rendered lines for the chat area
     $lines = New-Object System.Collections.Generic.List[object]
     foreach ($m in $messages) {
         $label = switch ($m.role) {
@@ -929,7 +1423,6 @@ function script:Render-Frame {
         $lines.Add(@{ text = ""; role = "gap" })
     }
 
-    # In-progress streaming message
     if ($streamState -and -not $streamState.Done) {
         $label = "Nautilus"
         $prefix = (Bold "$label " $th.assistant) + (Themed ([string]([char]0x203A) + " ") 'assistant')
@@ -957,7 +1450,6 @@ function script:Render-Frame {
         $lines.Add(@{ text = (Bold "Nautilus " $th.assistant) + (Themed ([string]([char]0x203A) + " ") 'assistant') + (Themed (Format-ApiError $streamState.Error) 'error'); role = "assistant" })
     }
 
-    # Empty state: home screen
     if ((@($messages).Count -eq 0) -and -not $streamState) {
         $lines.Clear()
         $lines.Add(@{ text = ""; role = "gap" })
@@ -970,12 +1462,11 @@ function script:Render-Frame {
         $lines.Add(@{ text = (Themed "  /theme" 'accent') + (Dim "  - switch the colour theme"); role = "system" })
         $lines.Add(@{ text = (Themed "  /config" 'accent') + (Dim " - view / edit configuration"); role = "system" })
         $lines.Add(@{ text = (Themed "  /clear" 'accent') + (Dim "  - wipe conversation history"); role = "system" })
-        $lines.Add(@{ text = (Themed "  /exit" 'accent') + (Dim "   - close Nautilus  (or press Esc)"); role = "system" })
+        $lines.Add(@{ text = (Themed "  /exit" 'accent') + (Dim "   - close Nautilus  (or press Esc twice)"); role = "system" })
         $lines.Add(@{ text = ""; role = "gap" })
-        $lines.Add(@{ text = (Dim "  Or just start typing, Daddy."); role = "system" })
+        $lines.Add(@{ text = (Dim "  Or just start typing, Daddy.  Press ? for shortcuts."); role = "system" })
     }
 
-    # Paint (home + clear-eol; avoid full 2J flicker)
     Write-Host "$script:Esc[H" -NoNewline
     Write-At 1 1 $topLine -ClearEol
     Write-At 2 1 $borderTop -ClearEol
@@ -1003,28 +1494,83 @@ function script:Render-Frame {
         $r++
     }
 
-    Write-At ($h - 2) 1 $borderBot -ClearEol
-
-    # status line — rotating flavour when idle; notice / thinking override
+    # ---- hint strip / toast / notice ----
     $themeName = if ($script:Config -and $script:Config.theme) { $script:Config.theme } else { "Nautilus" }
-    if ($notice) {
-        $statusText = (Themed $notice 'warn')
-    } elseif ($streamState -and -not $streamState.Done) {
+    $streaming = ($streamState -and -not $streamState.Done)
+    $hintCol = 1
+    if ($script:ToastText) {
+        $plain = [string]$script:ToastText
+        $hintText = (Themed $plain 'warn')
+        $hintCol = [Math]::Max(1, [int](($w - $plain.Length) / 2))
+    } elseif ($notice) {
+        $hintText = (Themed $notice 'warn')
+    } elseif ($streaming) {
         $sp = $script:Spinner[$spinIdx % $script:Spinner.Count]
         $msg = if ($thinkingMsg) { $thinkingMsg } else { "working..." }
-        $statusText = (Themed "$sp $msg" 'accent')
+        $hintText = (Themed "$sp $msg" 'accent') + (Dim "   esc cancel")
+    } else {
+        # Contextual shortcut hints (Grok shortcuts bar–inspired)
+        $hintText = (Dim " enter") + (Themed " send" 'dim') + (Dim "  /") + (Themed " commands" 'dim') + (Dim "  ?") + (Themed " keys" 'dim') + (Dim "  esc") + (Themed " quit" 'dim')
+    }
+    Write-At $hintRow 1 "" -ClearEol
+    Write-At $hintRow $hintCol $hintText
+
+    # ---- compact 3-line rounded prompt (Grok prompt_widget) ----
+    $innerW = [Math]::Max(8, $w - 2)
+    $hLine = $box.H * $innerW
+    Write-At $promptTop 1 ((Themed ($box.TL + $hLine + $box.TR) 'border')) -ClearEol
+
+    $prompt = (Themed "> " 'accent')
+    $buf = if ($null -eq $inputBuffer) { "" } else { $inputBuffer }
+    $maxBuf = [Math]::Max(1, $innerW - 4)
+    if ($buf.Length -gt $maxBuf) { $buf = $buf.Substring($buf.Length - $maxBuf) }
+    $midBody = "> " + $buf
+    $midPad = $innerW - $midBody.Length
+    if ($midPad -lt 0) { $midPad = 0 }
+    # paint prompt with colour on '>' only
+    $midLine = (Themed $box.V 'border') + $prompt + $buf + (" " * $midPad) + (Themed $box.V 'border')
+    Write-At $promptMid 1 $midLine -ClearEol
+
+    # bottom caption: update tip | model · theme | streaming flavour
+    $captionPlain = ""
+    $captionColored = ""
+    if ($script:PendingUpdateVersion -and -not $streaming) {
+        $ver = [string]$script:PendingUpdateVersion
+        $captionPlain = " Update: v$ver available, press ctrl+u to restart "
+        $captionColored = (Bold " Update: " $th.accent) + (Themed ("v$ver available, press ctrl+u to restart ") 'accent')
     } else {
         $flavour = $script:StatusLines[$script:StatusIdx % $script:StatusLines.Count]
-        $statusText = (Themed ([string]([char]0x25C9)) 'good') + (Themed " online" 'dim') + (Themed "  |  $themeName" 'dim') + (Themed "  |  $flavour" 'dim')
+        $shortFlavour = $flavour
+        $captionPlain = " $modelName · $themeName "
+        if (($captionPlain.Length + 4) -lt $innerW) {
+            $room = $innerW - $captionPlain.Length - 3
+            if ($room -gt 8 -and $shortFlavour.Length -gt $room) {
+                $shortFlavour = $shortFlavour.Substring(0, $room - 3) + "..."
+            }
+            if ($room -gt 8) {
+                $captionPlain = " $modelName · $themeName · $shortFlavour "
+            }
+        }
+        if ($captionPlain.Length -gt ($innerW - 2)) {
+            $captionPlain = $captionPlain.Substring(0, [Math]::Max(4, $innerW - 5)) + "... "
+        }
+        $captionColored = (Dim $captionPlain)
     }
-    Write-At $statusRow 1 $statusText -ClearEol
-
-    # input line — ClearEol so shortening leaves no ghosts
-    $prompt = (Themed ([string]([char]0x25B6) + " ") 'accent')
-    $buf = if ($null -eq $inputBuffer) { "" } else { $inputBuffer }
-    $maxBuf = [Math]::Max(1, $w - 4)
-    if ($buf.Length -gt $maxBuf) { $buf = $buf.Substring($buf.Length - $maxBuf) }
-    Write-At $inputRow 1 ("$prompt$buf") -ClearEol
+    $capLen = $captionPlain.Length
+    $leftFill = 1
+    $rightFill = $innerW - $leftFill - $capLen
+    if ($rightFill -lt 0) {
+        $captionPlain = $captionPlain.Substring(0, [Math]::Max(0, $innerW - $leftFill))
+        $capLen = $captionPlain.Length
+        $rightFill = 0
+        if ($script:PendingUpdateVersion -and -not $streaming) {
+            $captionColored = (Themed $captionPlain 'accent')
+        } else {
+            $captionColored = (Dim $captionPlain)
+        }
+    }
+    $botLine = (Themed ($box.BL + ($box.H * $leftFill)) 'border') + $captionColored + (Themed (($box.H * $rightFill) + $box.BR) 'border')
+    Write-At $promptBot 1 $botLine -ClearEol
 }
 
 
@@ -1095,16 +1641,21 @@ function script:Run-TUI {
         break
     }
 
+    $applyUpdate = $false
     Register-TuiCancelHandler
     try {
         Enter-TUI
         Show-Startup
+        Start-UpdateCheck
         $inputBuffer = ""
         $notice = ""
         $spinIdx = 0
         $thinkIdx = 0
         $scrollOffset = [int]::MaxValue
         $running = $true
+        $script:EscArmUntil = $null
+        $script:ToastText = $null
+        $script:ToastUntil = $null
 
         while ($running) {
             if ($script:TuiForceExit) { $running = $false; break }
@@ -1121,25 +1672,85 @@ function script:Run-TUI {
                 if ($keyReady) { break }
                 Start-Sleep -Milliseconds 50
                 $waitTicks++
+                if (($waitTicks % 10) -eq 0) { Poll-UpdateCheck }
                 if ($waitTicks -ge 24) {
                     $waitTicks = 0
                     $script:StatusIdx = ($script:StatusIdx + 1) % [Math]::Max(1, $script:StatusLines.Count)
+                    Poll-UpdateCheck
                     Render-Frame -messages $messages -inputBuffer $inputBuffer -scrollOffset $scrollOffset -streamState $null -spinIdx $spinIdx -thinkingMsg "" -notice ""
                 }
             }
             if ($script:TuiForceExit) { $running = $false; break }
 
+            $ev = $null
             try {
-                $key = [Console]::ReadKey($true)
+                $still = $false
+                try { $still = [Console]::KeyAvailable } catch { $still = $false }
+                if (-not $still) { continue }
+                $ev = Read-TuiEvent -WaitMs 50
+                if (-not $ev) { continue }
             } catch {
                 Write-Host "Console input lost. Exiting TUI."
                 $running = $false
                 break
             }
 
-            if ($key.Key -eq "Escape") {
+            # Mouse wheel scrolls chat (best-effort)
+            if ($ev.Kind -eq 'MouseWheel') {
+                if ($ev.Delta -gt 0) {
+                    if ($scrollOffset -eq [int]::MaxValue) {
+                        $max = if ($script:LastMaxStart -ge 0) { $script:LastMaxStart } else { 0 }
+                        $scrollOffset = [Math]::Max(0, $max - 3)
+                    } else {
+                        $scrollOffset = [Math]::Max(0, $scrollOffset - 3)
+                    }
+                } else {
+                    if ($scrollOffset -ne [int]::MaxValue) {
+                        $max = if ($script:LastMaxStart -ge 0) { $script:LastMaxStart } else { 0 }
+                        $next = $scrollOffset + 3
+                        if ($next -ge $max) { $scrollOffset = [int]::MaxValue } else { $scrollOffset = $next }
+                    }
+                }
+                continue
+            }
+            if ($ev.Kind -eq 'MouseClick') {
+                # Region stub: chat click reserved for future focus/selection
+                continue
+            }
+            if ($ev.Kind -ne 'Key' -or -not $ev.Key) { continue }
+            $key = $ev.Key
+
+            # Ctrl+U applies pending update (wins over any line-edit binding)
+            $isCtrlU = ($key.Key -eq "U") -and (($key.Modifiers -band [ConsoleModifiers]::Control) -ne 0)
+            if ($isCtrlU -and $script:PendingUpdateVersion) {
+                $applyUpdate = $true
                 $running = $false
+                continue
+            }
+
+            # Ctrl+. opens shortcuts cheatsheet
+            $isCtrlDot = (($key.Key -eq "OemPeriod") -or ($key.KeyChar -eq '.')) -and (($key.Modifiers -band [ConsoleModifiers]::Control) -ne 0)
+            if ($isCtrlDot) {
+                Show-ShortcutsHelp
+                continue
+            }
+
+            # ? with empty buffer opens cheatsheet
+            if ($key.KeyChar -eq '?' -and [string]::IsNullOrEmpty($inputBuffer)) {
+                Show-ShortcutsHelp
+                continue
+            }
+
+            if ($key.Key -eq "Escape") {
+                Clear-EscArmIfExpired
+                if ($script:EscArmUntil) {
+                    $running = $false
+                } else {
+                    $script:EscArmUntil = [datetime]::UtcNow.AddSeconds(2)
+                    Set-Toast -Text "press esc again to quit" -Ms 2000
+                }
             } elseif ($key.Key -eq "Enter") {
+                $script:EscArmUntil = $null
                 $text = $inputBuffer.Trim()
                 $inputBuffer = ""
                 if ([string]::IsNullOrWhiteSpace($text)) { continue }
@@ -1264,6 +1875,16 @@ function script:Run-TUI {
                                 $notice = "search grounding is currently $state  (use /search on|off)"
                             }
                         }
+                        'update'  {
+                            if ($script:PendingUpdateVersion) {
+                                $applyUpdate = $true
+                                $running = $false
+                            } else {
+                                # Force apply even if check has not finished / no newer version known
+                                $applyUpdate = $true
+                                $running = $false
+                            }
+                        }
                         default   { $notice = "unknown command: /$name  (try /help)" }
                     }
                     continue
@@ -1330,10 +1951,12 @@ function script:Run-TUI {
                 Save-History -messages $messages -max $script:Config.maxHistory
                 continue
             } elseif ($key.Key -eq "Backspace") {
+                $script:EscArmUntil = $null
                 if ($inputBuffer.Length -gt 0) {
                     $inputBuffer = $inputBuffer.Substring(0, $inputBuffer.Length - 1)
                 }
             } elseif ($key.Key -eq "UpArrow") {
+                $script:EscArmUntil = $null
                 # Leave pin-to-bottom and move up one line
                 if ($scrollOffset -eq [int]::MaxValue) {
                     $max = if ($script:LastMaxStart -ge 0) { $script:LastMaxStart } else { 0 }
@@ -1342,6 +1965,7 @@ function script:Run-TUI {
                     $scrollOffset = [Math]::Max(0, $scrollOffset - 1)
                 }
             } elseif ($key.Key -eq "DownArrow") {
+                $script:EscArmUntil = $null
                 if ($scrollOffset -eq [int]::MaxValue) {
                     # already pinned
                 } else {
@@ -1353,6 +1977,7 @@ function script:Run-TUI {
                     }
                 }
             } elseif ($key.Key -eq "PageUp") {
+                $script:EscArmUntil = $null
                 if ($scrollOffset -eq [int]::MaxValue) {
                     $max = if ($script:LastMaxStart -ge 0) { $script:LastMaxStart } else { 0 }
                     $scrollOffset = [Math]::Max(0, $max - 5)
@@ -1360,6 +1985,7 @@ function script:Run-TUI {
                     $scrollOffset = [Math]::Max(0, $scrollOffset - 5)
                 }
             } elseif ($key.Key -eq "PageDown") {
+                $script:EscArmUntil = $null
                 if ($scrollOffset -eq [int]::MaxValue) {
                     # already pinned
                 } else {
@@ -1372,10 +1998,13 @@ function script:Run-TUI {
                     }
                 }
             } elseif ($key.Key -eq "Home") {
+                $script:EscArmUntil = $null
                 $scrollOffset = 0
             } elseif ($key.Key -eq "End") {
+                $script:EscArmUntil = $null
                 $scrollOffset = [int]::MaxValue
             } else {
+                $script:EscArmUntil = $null
                 $ch = $key.KeyChar
                 if (-not [char]::IsControl($ch) -and $ch -ne [char]0) {
                     $inputBuffer += $ch
@@ -1384,8 +2013,13 @@ function script:Run-TUI {
         }
     } finally {
         try { if ($streamState) { Dispose-StreamState $streamState } } catch { }
+        try { Stop-UpdateCheck } catch { }
         Exit-TUI
         Unregister-TuiCancelHandler
+    }
+
+    if ($applyUpdate) {
+        Invoke-PendingUpdateApply
     }
 }
 
@@ -1402,7 +2036,18 @@ Nautilus commands (type in the prompt):
   /model     /model <name>  set the Gemini model
   /search    /search on|off  toggle Google Search grounding
   /improve   /improve <request>  ask me to improve my own code
-  /exit      Close Nautilus  (or press Esc)
+  /update    Apply update from GitHub Pages (same as Ctrl+U when pending)
+  /exit      Close Nautilus  (or double-Esc)
+
+Keys:
+  Enter      Send message
+  Esc        Cancel in-flight request; press again within ~2s to quit
+  ?          Open shortcuts cheatsheet (when prompt is empty)
+  Ctrl+.     Open / close shortcuts cheatsheet
+  Ctrl+U     Apply pending in-TUI update (when tip is shown)
+  Up/Down    Scroll chat  |  PgUp/PgDn page  |  Home/End jump
+  Wheel      Scroll chat or menus (best-effort mouse)
+  Click      Select a menu row (best-effort mouse)
 
 Shell commands:
   nautilus                 Launch the interactive TUI
