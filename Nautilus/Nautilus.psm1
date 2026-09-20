@@ -2,10 +2,10 @@
     Nautilus - a pure-PowerShell futuristic TUI AI assistant.
     JARVIS-style personality, Gemini-powered, blue sci-fi aesthetic.
     Public command: nautilus  (alias: naut)
-    Version: 0.4.0.4
+    Version: 0.4.1.2
 #>
 
-$script:NautilusVersion = "0.4.0.4"
+$script:NautilusVersion = "0.4.1.2"
 $script:TuiActive = $false
 $script:TuiForceExit = $false
 $script:CancelHandlerRegistered = $false
@@ -1942,7 +1942,7 @@ function script:Render-Frame {
     Begin-Frame -FullClear:$doClear
 
     $titleBar = "  N A U T I L U S  v$($script:NautilusVersion)  "
-    $conn = "  * connected  asia-01  "
+    $conn = "  " + [string][char]0x25C9 + " connected  asia-01  "
     $modelName = if ($script:Config -and $script:Config.model) { $script:Config.model } else { $script:DefaultModel }
     $modelTag = "model: $modelName  "
     $padConn = $w - $titleBar.Length - $conn.Length - $modelTag.Length

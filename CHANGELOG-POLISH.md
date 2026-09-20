@@ -1,3 +1,10 @@
+# 0.4.1.2
+
+Versioning note: 0.4.1.x is the UI-polish train (0.4.0.3 → .1, 0.4.0.4 → .2 conceptually). Further feature work stays on later 0.4.1.__ / 0.4.2.__ as needed.
+
+- Restored title status **dot** `◉` (U+25C9) next to `connected` — the 0.4.0.3 ASCII `*` swap was unnecessary on Alex’s host.
+- Keeps rounded borders + scrollbar gutter from 0.4.0.4 / 0.4.1.1.
+
 # 0.4.0.4
 
 - **Rounded borders back on** by default (`UseRoundedBorders = $true` → `╭─╮│╰─╯`). ASCII `+ - |` remains the fallback when rounded is off.
