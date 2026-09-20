@@ -2,10 +2,10 @@
     Nautilus - a pure-PowerShell futuristic TUI AI assistant.
     JARVIS-style personality, Gemini-powered, blue sci-fi aesthetic.
     Public command: nautilus  (alias: naut)
-    Version: 0.4.0.1
+    Version: 0.4.0.2
 #>
 
-$script:NautilusVersion = "0.4.0.1"
+$script:NautilusVersion = "0.4.0.2"
 $script:TuiActive = $false
 $script:TuiForceExit = $false
 $script:CancelHandlerRegistered = $false
@@ -257,20 +257,26 @@ function script:Clear-EscArmIfExpired {
 # ===========================================================================
 #  SLASH-COMMAND AUTOCOMPLETE  (Grok Build completion_dropdown feel)
 # ===========================================================================
+function script:Get-SlashCategoryOrder {
+    return @('Session', 'Clipboard & export', 'Theme & UI', 'Help')
+}
+
 function script:Get-SlashCatalog {
+    # Wave 1 + existing commands, tagged for grouped / dropdown
     return @(
-        @{ Name = 'help';    Desc = 'show commands and keys';     Argful = $false }
-        @{ Name = 'new';     Desc = 'new chat (clear history)';   Argful = $false }
-        @{ Name = 'clear';   Desc = 'wipe conversation history';  Argful = $false }
-        @{ Name = 'copy';    Desc = 'copy last assistant reply';  Argful = $false }
-        @{ Name = 'export';  Desc = 'export transcript to file';  Argful = $true }
-        @{ Name = 'exit';    Desc = 'close Nautilus';             Argful = $false }
-        @{ Name = 'theme';   Desc = 'switch colour theme';        Argful = $true }
-        @{ Name = 'model';   Desc = 'pick Gemini model';          Argful = $true }
-        @{ Name = 'config';  Desc = 'view configuration';         Argful = $false }
-        @{ Name = 'search';  Desc = 'toggle search grounding';    Argful = $true }
-        @{ Name = 'update';  Desc = 'self-update from Pages';     Argful = $false }
-        @{ Name = 'improve'; Desc = 'improve my own code';         Argful = $true }
+        @{ Name = 'new';       Desc = 'new chat (clear history)';   Category = 'Session';            Argful = $false }
+        @{ Name = 'clear';     Desc = 'wipe conversation history';  Category = 'Session';            Argful = $false }
+        @{ Name = 'exit';      Desc = 'close Nautilus';             Category = 'Session';            Argful = $false }
+        @{ Name = 'update';    Desc = 'self-update from Pages';     Category = 'Session';            Argful = $false }
+        @{ Name = 'copy';      Desc = 'copy last assistant reply';  Category = 'Clipboard & export'; Argful = $false }
+        @{ Name = 'export';    Desc = 'export transcript to file';  Category = 'Clipboard & export'; Argful = $true }
+        @{ Name = 'theme';     Desc = 'switch colour theme';        Category = 'Theme & UI';         Argful = $true }
+        @{ Name = 'model';     Desc = 'pick Gemini model';          Category = 'Theme & UI';         Argful = $true }
+        @{ Name = 'config';    Desc = 'view configuration';         Category = 'Theme & UI';         Argful = $false }
+        @{ Name = 'search';    Desc = 'toggle search grounding';    Category = 'Theme & UI';         Argful = $true }
+        @{ Name = 'improve';   Desc = 'improve my own code';         Category = 'Theme & UI';         Argful = $true }
+        @{ Name = 'help';      Desc = 'show commands and keys';     Category = 'Help';               Argful = $false }
+        @{ Name = 'shortcuts'; Desc = 'keyboard shortcuts sheet';   Category = 'Help';               Argful = $false }
     )
 }
 
@@ -281,14 +287,18 @@ function script:Get-SlashMatches {
     if ($Buffer -notmatch '^/\S*$') { return @() }
     $prefix = if ($Buffer.Length -le 1) { "" } else { $Buffer.Substring(1) }
     $all = @(Get-SlashCatalog)
-    if ([string]::IsNullOrEmpty($prefix)) { return $all }
-    $out = @()
+    $filtered = @()
     foreach ($item in $all) {
-        if ($item.Name.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
-            $out += $item
+        if ([string]::IsNullOrEmpty($prefix) -or $item.Name.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $filtered += $item
         }
     }
-    return $out
+    # Stable group order for effortless scanning
+    $order = @(Get-SlashCategoryOrder)
+    $rank = @{}
+    for ($i = 0; $i -lt $order.Count; $i++) { $rank[$order[$i]] = $i }
+    $sorted = @($filtered | Sort-Object @{ Expression = { if ($rank.ContainsKey([string]$_.Category)) { $rank[[string]$_.Category] } else { 99 } } }, @{ Expression = { $_.Name } })
+    return $sorted
 }
 
 function script:Get-SlashFill {
@@ -340,11 +350,23 @@ function script:Draw-SlashDropdown {
     $box = Get-Box
     $th = if ($script:CurrentTheme) { $script:CurrentTheme } else { $script:Themes["Nautilus"] }
 
-    $maxVisible = 6
-    $visCount = [Math]::Min($items.Count, $maxVisible)
+    # Build display rows: muted category headers + selectable command rows
+    $display = New-Object System.Collections.Generic.List[object]
+    $prevCat = $null
+    for ($i = 0; $i -lt $items.Count; $i++) {
+        $it = $items[$i]
+        $cat = [string]$it.Category
+        if ([string]::IsNullOrEmpty($cat)) { $cat = "Commands" }
+        if ($cat -ne $prevCat) {
+            $display.Add(@{ Kind = 'header'; Text = $cat })
+            $prevCat = $cat
+        }
+        $display.Add(@{ Kind = 'item'; Index = $i; Item = $it })
+    }
+
+    $maxVisible = 10
     $footerHint = "up/down  tab fill  enter run  esc"
 
-    # Label column width from longest "/name"
     $labelCol = 0
     foreach ($it in $items) {
         $lw = ("/" + $it.Name).Length
@@ -352,32 +374,43 @@ function script:Draw-SlashDropdown {
     }
     $labelCol = [Math]::Min([Math]::Max($labelCol, 6), 16)
 
-    $contentW = $labelCol + 2 + 22  # prefix + label + gap + desc budget
+    $contentW = $labelCol + 2 + 24
+    foreach ($catName in @(Get-SlashCategoryOrder)) {
+        if ($catName.Length + 1 -gt $contentW) { $contentW = $catName.Length + 1 }
+    }
     if ($footerHint.Length + 1 -gt $contentW) { $contentW = $footerHint.Length + 1 }
-    $innerW = [Math]::Max(28, [Math]::Min($contentW + 2, $WinW - 6))
+    $innerW = [Math]::Max(30, [Math]::Min($contentW + 2, $WinW - 6))
     $boxW = $innerW + 2
 
-    # rows: top, items, footer, bottom
+    # Scroll so the selected command row stays in view (headers count toward height)
+    $selDisp = 0
+    for ($d = 0; $d -lt $display.Count; $d++) {
+        if ($display[$d].Kind -eq 'item' -and [int]$display[$d].Index -eq $idx) {
+            $selDisp = $d
+            break
+        }
+    }
+    $viewTop = 0
+    if ($display.Count -gt $maxVisible) {
+        $half = [int]($maxVisible / 2)
+        if ($selDisp -lt $half) {
+            $viewTop = 0
+        } elseif ($selDisp + $half -ge $display.Count) {
+            $viewTop = $display.Count - $maxVisible
+        } else {
+            $viewTop = $selDisp - $half
+        }
+        if ($viewTop -lt 0) { $viewTop = 0 }
+    }
+    $viewEnd = [Math]::Min($display.Count, $viewTop + $maxVisible)
+    $visCount = $viewEnd - $viewTop
+
+    # rows: top, visible display, footer, bottom
     $boxHeight = $visCount + 3
     $startRow = $PromptTop - $boxHeight
     if ($startRow -lt 3) { $startRow = 3 }
     $startCol = [Math]::Max(1, [int](($WinW - $boxW) / 2) + 1)
     if ($startCol + $boxW - 1 -gt $WinW) { $startCol = [Math]::Max(1, $WinW - $boxW) }
-
-    # scroll window centred on selection (Grok scroll_offset)
-    $viewTop = 0
-    if ($items.Count -gt $maxVisible) {
-        $half = [int]($maxVisible / 2)
-        if ($idx -lt $half) {
-            $viewTop = 0
-        } elseif ($idx + $half -ge $items.Count) {
-            $viewTop = $items.Count - $maxVisible
-        } else {
-            $viewTop = $idx - $half
-        }
-        if ($viewTop -lt 0) { $viewTop = 0 }
-    }
-    $viewEnd = [Math]::Min($items.Count, $viewTop + $visCount)
 
     $hLine = $box.H * $innerW
     $row = $startRow
@@ -385,8 +418,21 @@ function script:Draw-SlashDropdown {
     $row++
 
     $script:SlashHitRows = @()
-    for ($i = $viewTop; $i -lt $viewEnd; $i++) {
-        $it = $items[$i]
+    for ($d = $viewTop; $d -lt $viewEnd; $d++) {
+        $dr = $display[$d]
+        if ($dr.Kind -eq 'header') {
+            $ht = [string]$dr.Text
+            if ($ht.Length -gt ($innerW - 2)) { $ht = $ht.Substring(0, [Math]::Max(1, $innerW - 5)) + "..." }
+            $body = " " + $ht
+            $pad = $innerW - $body.Length
+            if ($pad -lt 0) { $pad = 0 }
+            $line = (Themed $box.V 'border') + (Dim $body) + (" " * $pad) + (Themed $box.V 'border')
+            Write-At $row $startCol $line
+            $row++
+            continue
+        }
+        $i = [int]$dr.Index
+        $it = $dr.Item
         $label = "/" + $it.Name
         if ($label.Length -lt $labelCol) { $label = $label + (" " * ($labelCol - $label.Length)) }
         $desc = [string]$it.Desc
@@ -1395,6 +1441,7 @@ function script:Get-ShortcutRows {
         @{ Keys = '/copy';     Desc = 'Copy last assistant reply' }
         @{ Keys = '/export';   Desc = 'Export transcript to file' }
         @{ Keys = '/help';     Desc = 'Slash help (same bindings listed)' }
+        @{ Keys = '/shortcuts'; Desc = 'Open shortcuts cheatsheet' }
         @{ Keys = '/theme';    Desc = 'Theme picker (arrows / click / Esc)' }
         @{ Keys = '/model';    Desc = 'Model picker' }
         @{ Keys = '/clear';    Desc = 'Wipe conversation history' }
@@ -1717,16 +1764,19 @@ function script:Export-Transcript {
 }
 
 function script:Show-CommandPalette {
-    $items = @(Get-SlashCatalog)
+    $items = @(Get-SlashMatches -Buffer "/")
+    if ($items.Count -eq 0) { $items = @(Get-SlashCatalog) }
     if ($items.Count -eq 0) { return $null }
     $labels = @()
     foreach ($it in $items) {
-        $labels += ("/" + $it.Name + "  " + $it.Desc)
+        $cat = [string]$it.Category
+        if ([string]::IsNullOrEmpty($cat)) { $cat = "Commands" }
+        $labels += ($cat + "  /" + $it.Name + "  " + $it.Desc)
     }
     $chosen = Select-Menu -Title "Command palette (Ctrl+K)" -Options $labels -DefaultIndex 0
     if (-not $chosen) { return $null }
     $name = $null
-    if ($chosen -match '^/(\S+)') { $name = $Matches[1] }
+    if ($chosen -match '/(\S+)') { $name = $Matches[1] }
     if (-not $name) { return $null }
     foreach ($it in $items) {
         if ($it.Name -eq $name) { return $it }
@@ -1773,17 +1823,18 @@ function script:Render-ChromeOnly {
     $h = [Console]::WindowHeight
     if ($w -lt 30 -or $h -lt 12) { return $false }
 
-    $hintRow   = $h - 3
-    $promptTop = $h - 2
-    $promptMid = $h - 1
-    $promptBot = $h
+    # 2-line prompt (no bottom status/footer strip) — reclaim a chat row
+    $hintRow   = $h - 2
+    $promptTop = $h - 1
+    $promptMid = $h
     $innerW = [Math]::Max(8, $w - 2)
-    $modelName = if ($script:Config -and $script:Config.model) { $script:Config.model } else { $script:DefaultModel }
-    $themeName = if ($script:Config -and $script:Config.theme) { $script:Config.theme } else { "Nautilus" }
     $streaming = ($streamState -and -not $streamState.Done)
 
+    $buf = if ($null -eq $inputBuffer) { "" } else { $inputBuffer }
+    $isMulti = ($buf.IndexOf([char]10) -ge 0)
+
     Begin-Frame
-    # hint strip
+    # hint strip: toast / notice / stream / multiline / update (no model·theme·flavour bar)
     $hintCol = 1
     if ($script:ToastText) {
         $plain = [string]$script:ToastText
@@ -1795,6 +1846,12 @@ function script:Render-ChromeOnly {
         $sp = $script:Spinner[$spinIdx % $script:Spinner.Count]
         $msg = if ($thinkingMsg) { $thinkingMsg } else { "working..." }
         $hintText = (Themed "$sp $msg" 'accent') + (Dim "   esc cancel")
+    } elseif ($isMulti) {
+        $hintText = (Themed " multiline" 'muted') + (Dim "  Alt+Enter / Ctrl+J / \\+Enter")
+    } elseif ($script:PendingUpdateVersion) {
+        $ver = [string]$script:PendingUpdateVersion
+        $hintText = (Bold "Update: " $th.accent) + (Themed ("v$ver available, press ctrl+u to restart") 'accent')
+        $hintCol = [Math]::Max(1, [int](($w - (("Update: v$ver available, press ctrl+u to restart").Length)) / 2))
     } else {
         $hintText = (Dim " enter") + (Themed " send" 'muted') + (Dim "  /") + (Themed " commands" 'muted') + (Dim "  ?") + (Themed " keys" 'muted') + (Dim "  esc") + (Themed " quit" 'muted')
     }
@@ -1805,8 +1862,6 @@ function script:Render-ChromeOnly {
     Write-At $promptTop 1 ((Themed ($box.TL + $hLine + $box.TR) 'border')) -ClearEol
 
     $prompt = (Themed "> " 'accent')
-    $buf = if ($null -eq $inputBuffer) { "" } else { $inputBuffer }
-    $isMulti = ($buf.IndexOf([char]10) -ge 0)
     if ($isMulti) {
         $parts = $buf -split "`n"
         $buf = $parts[$parts.Count - 1]
@@ -1818,49 +1873,6 @@ function script:Render-ChromeOnly {
     if ($midPad -lt 0) { $midPad = 0 }
     $midLine = (Themed $box.V 'border') + $prompt + (Themed $buf 'text') + (" " * $midPad) + (Themed $box.V 'border')
     Write-At $promptMid 1 $midLine -ClearEol
-
-    $captionPlain = ""
-    $captionColored = ""
-    if ($isMulti -and -not $streaming) {
-        $captionPlain = " multiline · Alt+Enter / Ctrl+J · \\+Enter "
-        $captionColored = (Themed $captionPlain 'muted')
-    } elseif ($script:PendingUpdateVersion -and -not $streaming) {
-        $ver = [string]$script:PendingUpdateVersion
-        $captionPlain = " Update: v$ver available, press ctrl+u to restart "
-        $captionColored = (Bold " Update: " $th.accent) + (Themed ("v$ver available, press ctrl+u to restart ") 'accent')
-    } else {
-        $flavour = $script:StatusLines[$script:StatusIdx % $script:StatusLines.Count]
-        $shortFlavour = $flavour
-        $captionPlain = " $modelName · $themeName "
-        if (($captionPlain.Length + 4) -lt $innerW) {
-            $room = $innerW - $captionPlain.Length - 3
-            if ($room -gt 8 -and $shortFlavour.Length -gt $room) {
-                $shortFlavour = $shortFlavour.Substring(0, $room - 3) + "..."
-            }
-            if ($room -gt 8) {
-                $captionPlain = " $modelName · $themeName · $shortFlavour "
-            }
-        }
-        if ($captionPlain.Length -gt ($innerW - 2)) {
-            $captionPlain = $captionPlain.Substring(0, [Math]::Max(4, $innerW - 5)) + "... "
-        }
-        $captionColored = (Dim $captionPlain)
-    }
-    $capLen = $captionPlain.Length
-    $leftFill = 1
-    $rightFill = $innerW - $leftFill - $capLen
-    if ($rightFill -lt 0) {
-        $captionPlain = $captionPlain.Substring(0, [Math]::Max(0, $innerW - $leftFill))
-        $capLen = $captionPlain.Length
-        $rightFill = 0
-        if ($script:PendingUpdateVersion -and -not $streaming) {
-            $captionColored = (Themed $captionPlain 'accent')
-        } else {
-            $captionColored = (Dim $captionPlain)
-        }
-    }
-    $botLine = (Themed ($box.BL + ($box.H * $leftFill)) 'border') + $captionColored + (Themed (($box.H * $rightFill) + $box.BR) 'border')
-    Write-At $promptBot 1 $botLine -ClearEol
     End-Frame
     return $true
 }
@@ -1904,13 +1916,12 @@ function script:Render-Frame {
     $topLine = (Themed $titleBar 'bright') + (Themed (" " * $padConn) 'titlebar') + (Themed $conn 'muted') + (Themed $modelTag 'faint')
     $borderTop = (Themed ($box.H * [Math]::Max(1, $w)) 'border')
 
-    # Layout: title, top rule, chat, hint/toast, 3-line rounded prompt
-    $hintRow   = $h - 3
-    $promptTop = $h - 2
-    $promptMid = $h - 1
-    $promptBot = $h
+    # Layout: title, top rule, chat, hint/toast, 2-line rounded prompt (no status footer)
+    $hintRow   = $h - 2
+    $promptTop = $h - 1
+    $promptMid = $h
     $chatTop = 3
-    $chatBottom = $h - 4
+    $chatBottom = $h - 3
     if ($chatBottom -lt $chatTop) { $chatBottom = $chatTop }
     $chatHeight = $chatBottom - $chatTop + 1
     $chatWidth = $w - 2
@@ -2019,9 +2030,10 @@ function script:Render-Frame {
         $r++
     }
 
-    # ---- hint strip / toast / notice ----
-    $themeName = if ($script:Config -and $script:Config.theme) { $script:Config.theme } else { "Nautilus" }
+    # ---- hint strip / toast / notice / multiline / update (no model·theme·flavour footer) ----
     $streaming = ($streamState -and -not $streamState.Done)
+    $bufEarly = if ($null -eq $inputBuffer) { "" } else { $inputBuffer }
+    $isMulti = ($bufEarly.IndexOf([char]10) -ge 0)
     $hintCol = 1
     if ($script:ToastText) {
         $plain = [string]$script:ToastText
@@ -2033,20 +2045,25 @@ function script:Render-Frame {
         $sp = $script:Spinner[$spinIdx % $script:Spinner.Count]
         $msg = if ($thinkingMsg) { $thinkingMsg } else { "working..." }
         $hintText = (Themed "$sp $msg" 'accent') + (Dim "   esc cancel")
+    } elseif ($isMulti) {
+        $hintText = (Themed " multiline" 'muted') + (Dim "  Alt+Enter / Ctrl+J / \\+Enter")
+    } elseif ($script:PendingUpdateVersion) {
+        $ver = [string]$script:PendingUpdateVersion
+        $hintText = (Bold "Update: " $th.accent) + (Themed ("v$ver available, press ctrl+u to restart") 'accent')
+        $hintCol = [Math]::Max(1, [int](($w - (("Update: v$ver available, press ctrl+u to restart").Length)) / 2))
     } else {
         $hintText = (Dim " enter") + (Themed " send" 'muted') + (Dim "  /") + (Themed " commands" 'muted') + (Dim "  ?") + (Themed " keys" 'muted') + (Dim "  esc") + (Themed " quit" 'muted')
     }
     Write-At $hintRow 1 "" -ClearEol
     Write-At $hintRow $hintCol $hintText
 
-    # ---- compact 3-line rounded prompt ----
+    # ---- compact 2-line rounded prompt (top rule + > line; status footer removed) ----
     $innerW = [Math]::Max(8, $w - 2)
     $hLine = $box.H * $innerW
     Write-At $promptTop 1 ((Themed ($box.TL + $hLine + $box.TR) 'border')) -ClearEol
 
     $prompt = (Themed "> " 'accent')
-    $buf = if ($null -eq $inputBuffer) { "" } else { $inputBuffer }
-    $isMulti = ($buf.IndexOf([char]10) -ge 0)
+    $buf = $bufEarly
     $displayBuf = $buf
     if ($isMulti) {
         $parts = $buf -split "`n"
@@ -2059,52 +2076,6 @@ function script:Render-Frame {
     if ($midPad -lt 0) { $midPad = 0 }
     $midLine = (Themed $box.V 'border') + $prompt + (Themed $displayBuf 'text') + (" " * $midPad) + (Themed $box.V 'border')
     Write-At $promptMid 1 $midLine -ClearEol
-
-    $captionPlain = ""
-    $captionColored = ""
-    if ($isMulti -and -not $streaming) {
-        $captionPlain = " multiline · Alt+Enter / Ctrl+J · \\+Enter "
-        if ($captionPlain.Length -gt ($innerW - 2)) {
-            $captionPlain = " multiline "
-        }
-        $captionColored = (Themed $captionPlain 'muted')
-    } elseif ($script:PendingUpdateVersion -and -not $streaming) {
-        $ver = [string]$script:PendingUpdateVersion
-        $captionPlain = " Update: v$ver available, press ctrl+u to restart "
-        $captionColored = (Bold " Update: " $th.accent) + (Themed ("v$ver available, press ctrl+u to restart ") 'accent')
-    } else {
-        $flavour = $script:StatusLines[$script:StatusIdx % $script:StatusLines.Count]
-        $shortFlavour = $flavour
-        $captionPlain = " $modelName · $themeName "
-        if (($captionPlain.Length + 4) -lt $innerW) {
-            $room = $innerW - $captionPlain.Length - 3
-            if ($room -gt 8 -and $shortFlavour.Length -gt $room) {
-                $shortFlavour = $shortFlavour.Substring(0, $room - 3) + "..."
-            }
-            if ($room -gt 8) {
-                $captionPlain = " $modelName · $themeName · $shortFlavour "
-            }
-        }
-        if ($captionPlain.Length -gt ($innerW - 2)) {
-            $captionPlain = $captionPlain.Substring(0, [Math]::Max(4, $innerW - 5)) + "... "
-        }
-        $captionColored = (Dim $captionPlain)
-    }
-    $capLen = $captionPlain.Length
-    $leftFill = 1
-    $rightFill = $innerW - $leftFill - $capLen
-    if ($rightFill -lt 0) {
-        $captionPlain = $captionPlain.Substring(0, [Math]::Max(0, $innerW - $leftFill))
-        $capLen = $captionPlain.Length
-        $rightFill = 0
-        if ($script:PendingUpdateVersion -and -not $streaming) {
-            $captionColored = (Themed $captionPlain 'accent')
-        } else {
-            $captionColored = (Dim $captionPlain)
-        }
-    }
-    $botLine = (Themed ($box.BL + ($box.H * $leftFill)) 'border') + $captionColored + (Themed (($box.H * $rightFill) + $box.BR) 'border')
-    Write-At $promptBot 1 $botLine -ClearEol
 
     # Slash autocomplete dropdown floats just above the prompt
     if (-not $script:SlashMenuDismissed) {
@@ -2226,7 +2197,7 @@ function script:Run-TUI {
             }
             $notice = ""
 
-            # Idle wait: rotate status ~1 Hz; chrome-only when nothing else changed
+            # Idle wait: poll update + refresh chrome ~1 Hz for toast/update tip (no status-line rotation)
             $waitTicks = 0
             $keyReady = $false
             while (-not $keyReady) {
@@ -2242,9 +2213,8 @@ function script:Run-TUI {
                     $waitTicks = 0
                     continue
                 }
-                if ($waitTicks -ge 20) {  # ~1 Hz status rotation
+                if ($waitTicks -ge 20) {  # ~1 Hz chrome refresh (toast expiry / pending update)
                     $waitTicks = 0
-                    $script:StatusIdx = ($script:StatusIdx + 1) % [Math]::Max(1, $script:StatusLines.Count)
                     Poll-UpdateCheck
                     $okChrome = Render-ChromeOnly -inputBuffer $inputBuffer -streamState $null -spinIdx $spinIdx -thinkingMsg "" -notice ""
                     if (-not $okChrome) {
@@ -2371,8 +2341,9 @@ function script:Run-TUI {
                         $name = $parts[0].ToLower()
                         $arg = if ($parts.Count -gt 1) { $parts[1].Trim() } else { "" }
                         switch ($name) {
-                            'help'    { $messages = @($messages) + [pscustomobject]@{ role='system'; content=(Get-HelpText) }; $script:NeedsFullPaint = $true }
-                            'new'     { $messages = @(); Save-History -messages $messages -max 0; $notice = "new chat, Daddy"; $script:NeedsFullPaint = $true }
+                            'help'      { $messages = @($messages) + [pscustomobject]@{ role='system'; content=(Get-HelpText) }; $script:NeedsFullPaint = $true }
+                            'shortcuts' { Show-ShortcutsHelp; $script:NeedsFullClear = $true; $script:NeedsFullPaint = $true }
+                            'new'       { $messages = @(); Save-History -messages $messages -max 0; $notice = "new chat, Daddy"; $script:NeedsFullPaint = $true }
                             'clear'   { $messages = @(); Save-History -messages $messages -max 0; $notice = "history cleared, Daddy"; $script:NeedsFullPaint = $true }
                             'copy'    { $cr = Copy-LastAssistant -Messages $messages; $notice = $cr.Notice }
                             'export'  { $er = Export-Transcript -Messages $messages -PathArg $arg; $notice = $er.Notice }
@@ -2497,8 +2468,9 @@ function script:Run-TUI {
                     $arg = if ($parts.Count -gt 1) { $parts[1].Trim() } else { "" }
 
                     switch ($name) {
-                        'help'    { $messages = @($messages) + [pscustomobject]@{ role='system'; content=(Get-HelpText) } }
-                        'new'     { $messages = @(); Save-History -messages $messages -max 0; $notice = "new chat, Daddy" }
+                        'help'      { $messages = @($messages) + [pscustomobject]@{ role='system'; content=(Get-HelpText) } }
+                        'shortcuts' { Show-ShortcutsHelp; $script:NeedsFullClear = $true; $script:NeedsFullPaint = $true }
+                        'new'       { $messages = @(); Save-History -messages $messages -max 0; $notice = "new chat, Daddy" }
                         'clear'   { $messages = @(); Save-History -messages $messages -max 0; $notice = "history cleared, Daddy" }
                         'copy'    { $cr = Copy-LastAssistant -Messages $messages; $notice = $cr.Notice }
                         'export'  { $er = Export-Transcript -Messages $messages -PathArg $arg; $notice = $er.Notice }
@@ -2824,6 +2796,7 @@ function script:Get-HelpText {
     return @"
 Nautilus commands (type / in the prompt for autocomplete):
   /help      Show this help
+  /shortcuts Open keyboard shortcuts cheatsheet (same as ? / Ctrl+.)
   /new       New chat (clear history + soft reset)
   /clear     Clear conversation history
   /copy      Copy last assistant reply (clipboard or ~/.nautilus/last-copy.txt)

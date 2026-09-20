@@ -59,7 +59,8 @@ nautilus help            # full command list
 - **Up/Down** on an empty prompt cycles sent-prompt history; with `/` open they move the slash menu; otherwise they scroll chat (**PgUp/PgDn** / **Home/End** / wheel still scroll).
 - **Multiline**: Alt+Enter or Ctrl+J inserts a newline; or end a line with `\` then Enter (PS 5.1-friendly). Enter alone still sends.
 - Menu pickers (`/theme`, `/model`) support arrows, Enter, Esc, and best-effort **click**.
-- Smoother TUI paint in **0.4.0.1** (batched ANSI, no per-frame full clear, idle chrome-only status rotation).
+- Smoother TUI paint in **0.4.0.1** (batched ANSI, no per-frame full clear, idle chrome-only refresh).
+- **0.4.0.2**: removed bottom model/theme/connection status footer; 2-line prompt; grouped `/` slash popup by category.
 
 ## Themes
 
@@ -79,8 +80,8 @@ nautilus theme Cyber
   fallback for older hosts / stream failures.
 - Local config at `~/.nautilus/config.json`, history at `~/.nautilus/history.json`.
 - Virtual Terminal processing is enabled in-process on Windows PowerShell 5.1.
-- Thinking spinner + rotating status lines (Grok-Build inspired polish).
-- Rounded box chrome, slash autocomplete, command palette, prompt history, multiline input, smoother frame paint, retuned dark palettes (0.4.0.1).
+- Thinking spinner (Grok-Build inspired polish); connection flavour lives in the title bar / startup only.
+- Rounded box chrome, grouped slash autocomplete, command palette, prompt history, multiline input, smoother frame paint, retuned dark palettes (0.4.0.1–0.4.0.2).
 
 ## Repository layout
 

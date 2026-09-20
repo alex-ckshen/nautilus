@@ -1,3 +1,17 @@
+# 0.4.0.2
+
+## Chrome
+- **Removed bottom status/footer strip** under the `>` prompt (`model · theme · connected to … ———`). Dropped caption painting in `Render-Frame` / `Render-ChromeOnly` and stopped idle `$script:StatusIdx` flavour rotation.
+- Prompt chrome is now a **compact 2-line** rounded box (top rule + `>` line), reclaiming one chat row.
+- Multiline tip and pending **Update:** tip surface on the existing hint strip only (no new bar).
+
+## Slash `/` popup
+- Commands grouped by category for scanning: **Session**, **Clipboard & export**, **Theme & UI**, **Help**.
+- Category headers are muted; selected command row stays accent+bold; unselected muted. Filter + ↑↓/Tab/Enter/Esc unchanged.
+- Added `/shortcuts` (opens the same cheatsheet as `?` / Ctrl+.). Ctrl+K palette labels include category.
+
+Proxy / gist / Gemini wiring untouched. UTF-8 BOM on `.psm1`/`.psd1`; `install.ps1` unchanged.
+
 # 0.4.0.1
 
 ## Smooth rendering
