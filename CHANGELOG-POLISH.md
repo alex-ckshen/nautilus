@@ -1,3 +1,12 @@
+# 0.3.46.2 (installer)
+
+- **Root cause:** Windows PS 5.1 `irm` mis-decodes UTF-8 BOM as `ï»¿`, which desyncs the parser and makes later `' | '` / nested quotes look like pipelines.
+- **Fix:** `install.ps1` is now **UTF-8 without BOM**, pure ASCII; no `|` inside string literals; prefer `iex (irm ...)` in the header comment.
+
+# 0.3.46.1 (installer)
+
+- **Fix `irm | iex` on Windows PS 5.1**: installer logo no longer uses ASCII-art `|` / nested quotes (those were parsed as empty pipeline elements). Banner is plain text; success lines also drop decorative pipes.
+
 # 0.3.46.0
 
 - **Rounded chrome** (Grok Build prompt_widget): script `Box` glyphs `U+256D/256E/2570/256F` + `U+2500/2502`, `BoxAscii` fallback `+ - |`. `UseRoundedBorders` defaults **true**. `Select-Menu` uses rounded box; `Render-Frame` input is a compact **3-line rounded prompt** (top rule, middle `> ` line, bottom caption with model/theme or update tip).
