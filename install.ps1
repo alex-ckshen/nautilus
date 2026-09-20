@@ -25,12 +25,13 @@ function script:W-G { param($t) "$esc[38;5;245m$t$esc[0m" }   # grey
 function script:W-Y { param($t) "$esc[38;5;221m$t$esc[0m" }   # warm yellow
 function script:W-R { param($t) "$esc[38;5;203m$t$esc[0m" }   # soft red
 function script:W-Logo {
+    # Single-quoted so ASCII-art backticks stay literal (PS escapes ` in "")
     $l = @(
-        "  _   _      _          _        "
-        " | \ | | ___| |__  _ __| |_ __ _ "
-        " |  \| |/ _ \ '_ \| '__| __/ _` |"
-        " | |\  |  __/ | | | |  | || (_| |"
-        " |_| \_|\___|_| |_|_|   \__\__,_|"
+        '  _   _      _          _        '
+        ' | \ | | ___| |__  _ __| |_ __ _ '
+        ' |  \| |/ _ \ ''_ \| ''__| __/ _` |'
+        ' | |\  |  __/ | | | |  | || (_| |'
+        ' |_| \_|\___|_| |_|_|   \__\__,_|'
     )
     foreach ($line in $l) { Write-Host (W-B $line) }
 }
@@ -47,12 +48,11 @@ function script:Remove-ProfileBlock {
     param([string]$ProfilePath)
     if (-not (Test-Path $ProfilePath)) { return }
     $content = Get-Content -Raw $ProfilePath
-    $start = "    # >>> Nautilus initialization >>>"
-    $end   = "    # <<< Nautilus initialization <<<"
+    if (-not $content) { return }
     $pattern = "(?s)\s*# >>> Nautilus initialization >>>.*?# <<< Nautilus initialization <<<"
     if ($content -match $pattern) {
         $cleaned = $content -replace $pattern, ""
-        Set-Content -Path $ProfilePath -Value $cleaned.TrimEnd() -NoNewline:$false -Encoding UTF8
+        Set-Content -Path $ProfilePath -Value $cleaned.TrimEnd() -Encoding UTF8
         Write-Host (W-G "  removed profile hook from $ProfilePath")
     }
 }
@@ -60,12 +60,16 @@ function script:Remove-ProfileBlock {
 function script:Add-ProfileBlock {
     param([string]$ProfilePath)
     $dir = Split-Path -Parent $ProfilePath
-    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    if ($dir -and -not (Test-Path $dir)) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    }
+    # Use Join-Path result so PS 7 on non-Windows still works; backslash form is fine on Windows
+    $manifest = Join-Path (Join-Path $InstallRoot "Nautilus") "Nautilus.psd1"
     $block = @"
 
 # >>> Nautilus initialization >>>
-if (Test-Path "$InstallRoot\Nautilus\Nautilus.psd1") {
-    Import-Module "$InstallRoot\Nautilus\Nautilus.psd1" -Force -ErrorAction SilentlyContinue
+if (Test-Path "$manifest") {
+    Import-Module "$manifest" -Force -ErrorAction SilentlyContinue
 }
 # <<< Nautilus initialization <<<
 "@
@@ -74,8 +78,11 @@ if (Test-Path "$InstallRoot\Nautilus\Nautilus.psd1") {
         Write-Host (W-G "  created profile at $ProfilePath")
     } else {
         $content = Get-Content -Raw $ProfilePath
-        if ($content -match "(?s)# >>> Nautilus initialization >>>.*?# <<< Nautilus initialization <<<") {
-            Write-Host (W-G "  profile hook already present at $ProfilePath")
+        if ($content -and $content -match "(?s)# >>> Nautilus initialization >>>.*?# <<< Nautilus initialization <<<") {
+            # Refresh the hook path in case InstallRoot moved
+            $cleaned = $content -replace "(?s)\s*# >>> Nautilus initialization >>>.*?# <<< Nautilus initialization <<<", ""
+            Set-Content -Path $ProfilePath -Value ($cleaned.TrimEnd() + "`r`n" + $block.Trim() + "`r`n") -Encoding UTF8
+            Write-Host (W-G "  refreshed profile hook at $ProfilePath")
         } else {
             Add-Content -Path $ProfilePath -Value $block -Encoding UTF8
             Write-Host (W-G "  added profile hook to $ProfilePath")
@@ -86,11 +93,11 @@ if (Test-Path "$InstallRoot\Nautilus\Nautilus.psd1") {
 Write-Host ""
 W-Logo
 Write-Host ""
-Write-Host (W-D "  Initializing Nautilus installer...") ""
+Write-Host (W-D "  Initializing Nautilus installer...")
 Write-Host ""
 
 if ($Uninstall) {
-    Write-Host (W-Y "  Uninstalling Nautilus...") ""
+    Write-Host (W-Y "  Uninstalling Nautilus...")
     foreach ($p in @($PROFILE.CurrentUserAllHosts, $PROFILE.CurrentUserCurrentHost)) {
         if ($p) { Remove-ProfileBlock -ProfilePath $p }
     }
@@ -99,7 +106,7 @@ if ($Uninstall) {
         Write-Host (W-G "  removed $InstallRoot")
     }
     Write-Host ""
-    Write-Host (W-B "  Nautilus uninstalled. Farewell, Daddy.") ""
+    Write-Host (W-B "  Nautilus uninstalled. Farewell, Daddy.")
     Write-Host ""
     return
 }
@@ -113,10 +120,11 @@ if (-not (Test-Path $ModuleRoot)) {
     New-Item -ItemType Directory -Path $ModuleRoot -Force | Out-Null
 }
 
-Write-Host (W-D "  Target: $ModuleRoot") ""
-Write-Host (W-C "  Establishing secure link to _alex.shen repository (asia-01)...") ""
+Write-Host (W-D "  Target: $ModuleRoot")
+Write-Host (W-C "  Establishing secure link to _alex.shen repository (asia-01)...")
 
 # --- Download module files ---------------------------------------------------
+# GitHub Pages serves the module under /Nautilus/ (not repo root)
 $files = @("Nautilus.psd1", "Nautilus.psm1")
 foreach ($f in $files) {
     $url  = "$RepoBase/Nautilus/$f"
@@ -129,15 +137,21 @@ foreach ($f in $files) {
         Write-Host (W-R "  failed to download $f from $url")
         Write-Host (W-R "  Error: $($_.Exception.Message)")
         Write-Host ""
-        Write-Host (W-Y "  Tip: GitHub Pages can take a minute to publish after enabling.") ""
-        Write-Host (W-Y "  Re-run the install command in a moment.") ""
+        Write-Host (W-Y "  Tip: GitHub Pages can take a minute to publish after a push.")
+        Write-Host (W-Y "  Re-run the install command in a moment.")
         exit 1
     }
 }
 
 # --- Register in profile (CurrentUserAllHosts so it works everywhere) ---------
-$targetProfile = $PROFILE.CurrentUserAllHosts
-if (-not $targetProfile) { $targetProfile = Join-Path (Split-Path $PROFILE) "profile.ps1" }
+$targetProfile = $null
+try { $targetProfile = $PROFILE.CurrentUserAllHosts } catch { }
+if (-not $targetProfile) {
+    try { $targetProfile = $PROFILE.CurrentUserCurrentHost } catch { }
+}
+if (-not $targetProfile) {
+    $targetProfile = Join-Path (Join-Path $HOME "Documents") "PowerShell/profile.ps1"
+}
 Add-ProfileBlock -ProfilePath $targetProfile
 
 # --- Load into the current session immediately --------------------------------
@@ -146,6 +160,7 @@ try {
     Write-Host (W-G "  module loaded in current session")
 } catch {
     Write-Host (W-Y "  note: open a new PowerShell session to use nautilus")
+    Write-Host (W-Y "  ($($_.Exception.Message))")
 }
 
 Write-Host ""
@@ -154,19 +169,27 @@ Write-Host (W-B "  |  Nautilus core online - personality matrix loaded          
 Write-Host (W-B "  |  Welcome back, Daddy. Systems are nominal.               |")
 Write-Host (W-B "  +----------------------------------------------------------+")
 Write-Host ""
-Write-Host (W-C "  Quick start:") ""
+Write-Host (W-C "  Quick start:")
 Write-Host (W-G "    nautilus                 - launch the interactive TUI")
 Write-Host (W-G "    nautilus ask `"hello`"     - one-shot question")
 Write-Host (W-G "    nautilus help            - show all commands")
 Write-Host (W-G "    nautilus config          - view / edit configuration")
 Write-Host (W-G "    nautilus theme           - switch theme")
-Write-Host (W-G "    nautilus update         - self-update")
-Write-Host (W-G "    nautilus uninstall      - remove Nautilus")
+Write-Host (W-G "    nautilus update          - self-update")
+Write-Host (W-G "    nautilus uninstall       - remove Nautilus")
 Write-Host ""
 if (-not $Silent) {
-    Write-Host (W-D "  Launch now? [Y/n]") ""
-    $reply = Read-Host
+    Write-Host (W-D "  Launch now? [Y/n]")
+    try {
+        $reply = Read-Host
+    } catch {
+        $reply = "n"
+    }
     if (-not $reply -or $reply -match "^[Yy]") {
-        nautilus
+        if (Get-Command nautilus -ErrorAction SilentlyContinue) {
+            nautilus
+        } else {
+            Write-Host (W-Y "  nautilus command not yet available - open a new session.")
+        }
     }
 }

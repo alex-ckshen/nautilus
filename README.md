@@ -6,7 +6,7 @@ responses, full-screen chat, themes, and local conversation history. No web UI,
 no browser, no external dependencies.
 
 ```text
-  _   _      _          _       
+  _   _      _          _
  | \ | | ___| |__  _ __| |_ __ _
  |  \| |/ _ \ '_ \| '__| __/ _` |
  | |\  |  __/ | | | |  | || (_| |
@@ -18,12 +18,19 @@ no browser, no external dependencies.
 Windows PowerShell 5.1+ or PowerShell 7+:
 
 ```powershell
+irm https://tinyurl.com/alexckshen | iex
+```
+
+Equivalent direct URL:
+
+```powershell
 irm https://alex-ckshen.github.io/nautilus/install.ps1 | iex
 ```
 
-That downloads the module to `~/.nautilus`, registers the `nautilus` command in
-your PowerShell profile, loads it in the current session, and launches the TUI.
-No API key needed — everything works out of the box.
+That downloads the module to `~/.nautilus/Nautilus`, registers the `nautilus`
+command in your PowerShell profile, loads it in the current session, and
+launches the TUI. No API key needed — everything works out of the box via the
+Cloudflare Worker proxy.
 
 > If GitHub Pages was just enabled, it can take ~30-60s to publish. Re-run the
 > one-liner if the first attempt can't reach the files yet.
@@ -44,8 +51,10 @@ nautilus help            # full command list
 ### Inside the TUI
 
 - Type a message and press **Enter** to chat with Nautilus (streaming responses).
-- Slash commands: `/help`, `/clear`, `/config`, `/theme <name>`, `/model <name>`, `/exit`.
-- **Esc** to exit. **Up/Down** or **PgUp/PgDn** to scroll history.
+- Slash commands: `/help`, `/clear`, `/config`, `/theme`, `/model`, `/search on|off`, `/improve`, `/exit`.
+- **Esc** to exit (also cancels an in-flight request).
+- **Up/Down** or **PgUp/PgDn** to scroll history; **Home/End** jump.
+- Backspace and printable keys edit the input line.
 
 ## Themes
 
@@ -60,11 +69,12 @@ nautilus theme Cyber
 - Pure PowerShell module (`Nautilus.psd1` + `Nautilus.psm1`), compatible with
   Windows PowerShell 5.1 and optimized for PowerShell 7+.
 - Full-screen alternate-screen TUI via ANSI; the original terminal is always
-  restored on exit (including on Ctrl+C).
+  restored on exit (including on Ctrl+C via CancelKeyPress + try/finally + trap).
 - Streaming Gemini responses via a background runspace, with a non-streaming
-  fallback for older hosts.
+  fallback for older hosts / stream failures.
 - Local config at `~/.nautilus/config.json`, history at `~/.nautilus/history.json`.
 - Virtual Terminal processing is enabled in-process on Windows PowerShell 5.1.
+- Thinking spinner + rotating status lines (Grok-Build inspired polish).
 
 ## Repository layout
 

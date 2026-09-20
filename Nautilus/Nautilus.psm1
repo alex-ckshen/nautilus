@@ -2,10 +2,15 @@
     Nautilus - a pure-PowerShell futuristic TUI AI assistant.
     JARVIS-style personality, Gemini-powered, blue sci-fi aesthetic.
     Public command: nautilus  (alias: naut)
-    Version: 0.3.42.1
+    Version: 1.0.1
 #>
 
-$script:NautilusVersion = "0.3.42.1"
+$script:NautilusVersion = "1.0.1"
+$script:TuiActive = $false
+$script:TuiForceExit = $false
+$script:CancelHandlerRegistered = $false
+$script:LastMaxStart = 0
+$script:StatusIdx = 0
 
 # ===========================================================================
 #  PRIVATE CONFIG
@@ -255,12 +260,20 @@ function script:Wrap-Text {
     param([string]$text, [int]$width)
     if ($width -lt 1) { $width = 1 }
     $out = New-Object System.Collections.Generic.List[string]
+    if ($null -eq $text) { $text = "" }
     foreach ($line in ($text -split "`n")) {
         if ([string]::IsNullOrEmpty($line)) { $out.Add(""); continue }
         $words = $line -split " "
         $cur = ""
         foreach ($w in $words) {
             if ([string]::IsNullOrEmpty($w)) { continue }
+            # Hard-break tokens longer than the wrap width
+            while ($w.Length -gt $width) {
+                if ($cur.Length -gt 0) { $out.Add($cur); $cur = "" }
+                $out.Add($w.Substring(0, $width))
+                $w = $w.Substring($width)
+            }
+            if ($w.Length -eq 0) { continue }
             if ($cur.Length -eq 0) {
                 $cur = $w
             } elseif ($cur.Length + 1 + $w.Length -le $width) {
@@ -288,7 +301,7 @@ function script:VisibleLen {
 function script:Load-Config {
     $cfg = [ordered]@{
         model        = $script:DefaultModel
-        theme        = "Midnight"
+        theme        = "Nautilus"
         temperature  = 0.85
         maxHistory   = 50
         personality  = $true
@@ -382,13 +395,18 @@ function script:Load-History {
 
 function script:Save-History {
     param([array]$messages, [int]$max)
+    if ($null -eq $messages) { $messages = @() }
+    $messages = @($messages)
     if ($max -gt 0 -and $messages.Count -gt $max) {
         $messages = $messages[($messages.Count - $max)..($messages.Count - 1)]
     }
     if (-not (Test-Path $script:NautilusHome)) {
         New-Item -ItemType Directory -Path $script:NautilusHome -Force | Out-Null
     }
-    $messages | ConvertTo-Json -Depth 6 | Set-Content -Path $script:HistoryFile -Encoding UTF8
+    # -InputObject required: empty pipeline yields no JSON on PS 5.1
+    $json = ConvertTo-Json -InputObject @($messages) -Depth 6
+    if ($null -eq $json -or $json -eq "") { $json = "[]" }
+    Set-Content -Path $script:HistoryFile -Value $json -Encoding UTF8
 }
 
 # ===========================================================================
@@ -511,11 +529,29 @@ function script:Invoke-GeminiStream {
 
 function script:Dispose-StreamState {
     param($state)
+    if ($null -eq $state) { return }
+    if ($state._Disposed) { return }
+    $state._Disposed = $true
     try {
-        if ($state._Handle) { $state._PowerShell.EndInvoke($state._Handle) }
+        if ($state._PowerShell -and $state._Handle -and -not $state._Handle.IsCompleted) {
+            try { $state._PowerShell.Stop() } catch { }
+        }
+    } catch { }
+    try {
+        if ($state._Handle -and $state._PowerShell) {
+            $state._PowerShell.EndInvoke($state._Handle)
+        }
     } catch { }
     try { if ($state._PowerShell) { $state._PowerShell.Dispose() } } catch { }
-    try { if ($state._Runspace) { $state._Runspace.Close(); $state._Runspace.Dispose() } } catch { }
+    try {
+        if ($state._Runspace) {
+            $state._Runspace.Close()
+            $state._Runspace.Dispose()
+        }
+    } catch { }
+    $state._Handle = $null
+    $state._PowerShell = $null
+    $state._Runspace = $null
 }
 
 function script:Invoke-GeminiFallback {
@@ -618,11 +654,47 @@ function script:Enter-TUI {
     Write-Host "$script:Esc[?1049h" -NoNewline   # alternate screen
     Write-Host "$script:Esc[?25l" -NoNewline     # hide cursor
     Write-Host "$script:Esc[2J" -NoNewline       # clear
+    $script:TuiActive = $true
 }
 function script:Exit-TUI {
-    Write-Host "$script:Esc[?1049l" -NoNewline
-    Write-Host "$script:Esc[?25h" -NoNewline
-    [Console]::CursorVisible = $true
+    if (-not $script:TuiActive) {
+        # Still best-effort restore in case of partial entry
+    }
+    try {
+        Write-Host "$script:Esc[?1049l" -NoNewline  # leave alternate screen
+        Write-Host "$script:Esc[?25h" -NoNewline    # show cursor
+        Write-Host "$script:Esc[0m" -NoNewline      # reset attrs
+    } catch { }
+    try { [Console]::CursorVisible = $true } catch { }
+    $script:TuiActive = $false
+}
+
+function script:Register-TuiCancelHandler {
+    # Restore alternate screen on Ctrl+C. Safe to call multiple times.
+    if ($script:CancelHandlerRegistered) { return }
+    try {
+        $script:CancelHandler = [ConsoleCancelEventHandler]{
+            param($sender, $e)
+            $e.Cancel = $true
+            try { Exit-TUI } catch { }
+            $script:TuiForceExit = $true
+        }
+        [Console]::add_CancelKeyPress($script:CancelHandler)
+        $script:CancelHandlerRegistered = $true
+    } catch {
+        # Some hosts (ISE, remoting) have no CancelKeyPress — try/finally still covers most exits
+        $script:CancelHandlerRegistered = $false
+    }
+}
+function script:Unregister-TuiCancelHandler {
+    if (-not $script:CancelHandlerRegistered) { return }
+    try {
+        if ($script:CancelHandler) {
+            [Console]::remove_CancelKeyPress($script:CancelHandler)
+        }
+    } catch { }
+    $script:CancelHandler = $null
+    $script:CancelHandlerRegistered = $false
 }
 
 function script:Clear-Screen {
@@ -630,8 +702,16 @@ function script:Clear-Screen {
 }
 
 function script:Write-At {
-    param([int]$row, [int]$col, [string]$text)
-    Write-Host "$script:Esc[$($row);$($col)H$text" -NoNewline
+    param([int]$row, [int]$col, [string]$text, [switch]$ClearEol)
+    if ($null -eq $text) { $text = "" }
+    $suffix = if ($ClearEol) { "$script:Esc[K" } else { "" }
+    Write-Host "$script:Esc[$($row);$($col)H$text$suffix" -NoNewline
+}
+
+function script:Clear-Row {
+    param([int]$row, [int]$width)
+    $w = [Math]::Max(0, $width)
+    Write-Host ("$script:Esc[$row;1H" + (" " * $w) + "$script:Esc[$row;1H") -NoNewline
 }
 
 function script:Render-Frame {
@@ -645,54 +725,72 @@ function script:Render-Frame {
         [string]$notice
     )
     $th = $script:CurrentTheme
+    if (-not $th) { $th = $script:Themes["Nautilus"] }
     $w = [Console]::WindowWidth
     $h = [Console]::WindowHeight
     if ($w -lt 30 -or $h -lt 12) {
         Clear-Screen
-        Write-At 1 1 (Themed "Nautilus needs a larger terminal window." 'error')
+        Write-At 1 1 (Themed "Nautilus needs a larger terminal window." 'error') -ClearEol
         return
     }
 
+    # Layout (1-based rows):
+    #   1          title bar
+    #   2          top border
+    #   3..h-3     chat viewport
+    #   h-2        bottom border
+    #   h-1        status
+    #   h          input
+    $chatTop    = 3
+    $chatBottom = $h - 3
+    $chatHeight = [Math]::Max(1, $chatBottom - $chatTop + 1)
+    $chatWidth  = [Math]::Max(10, $w - 2)
+    $statusRow  = $h - 1
+    $inputRow   = $h
+    $borderRowT = 2
+    $borderRowB = $h - 2
+
     $titleBar = "  N A U T I L U S  v$($script:NautilusVersion)  "
     $conn = "  $([char]0x25C9) connected  asia-01  "
-    $modelTag = "model: $($script:Config.model)  "
+    $modelName = if ($script:Config -and $script:Config.model) { $script:Config.model } else { $script:DefaultModel }
+    $modelTag = "model: $modelName  "
     $padConn = $w - $titleBar.Length - $conn.Length - $modelTag.Length
     if ($padConn -lt 0) { $padConn = 0 }
     $topLine = (Themed $titleBar 'bright') + (Themed (" " * $padConn) 'titlebar') + (Themed $conn 'accent') + (Themed $modelTag 'dim')
 
-    $borderTop = (Themed ([string]([char]0x2550) * $w) 'border')
+    $borderTop = (Themed ([string]([char]0x2550) * [Math]::Max(1, $w - 1)) 'border')
     $borderBot = $borderTop
-
-    $inputRow = $h
-    $statusRow = $h - 1
-    $chatTop = 2
-    $chatBottom = $h - 3
-    $chatHeight = $chatBottom - $chatTop + 1
-    $chatWidth = $w - 2
 
     # Build rendered lines for the chat area
     $lines = New-Object System.Collections.Generic.List[object]
+    if ($null -eq $messages) { $messages = @() }
     foreach ($m in $messages) {
         $label = switch ($m.role) {
             'user'      { "Daddy" }
-            'assistant'  { "Nautilus" }
+            'assistant' { "Nautilus" }
             default     { "System" }
+        }
+        $roleName = switch ($m.role) {
+            'user'      { 'user' }
+            'assistant' { 'assistant' }
+            default     { 'system' }
         }
         $roleCode = switch ($m.role) {
             'user'      { $th.user }
             'assistant' { $th.assistant }
             default     { $th.system }
         }
-        $prefix = (Bold "$label " $roleCode) + (Themed ([string]([char]0x203A) + " ") $roleCode)
-        $prefixLen = 8
-        $wrapped = Wrap-Text -text $m.content -width ($chatWidth - $prefixLen)
+        $prefix = (Bold "$label " $roleCode) + (Themed ([string]([char]0x203A) + " ") $roleName)
+        $prefixLen = [Math]::Max(2, (VisibleLen $prefix))
+        $content = if ($null -eq $m.content) { "" } else { [string]$m.content }
+        $wrapped = Wrap-Text -text $content -width ($chatWidth - $prefixLen)
         $first = $true
         foreach ($wl in $wrapped) {
             if ($first) {
-                $lines.Add(@{ text = $prefix + (Themed $wl $roleCode); role = $m.role })
+                $lines.Add(@{ text = $prefix + (Themed $wl $roleName); role = $m.role })
                 $first = $false
             } else {
-                $lines.Add(@{ text = (" " * $prefixLen) + (Themed $wl $roleCode); role = $m.role })
+                $lines.Add(@{ text = (" " * $prefixLen) + (Themed $wl $roleName); role = $m.role })
             }
         }
         $lines.Add(@{ text = ""; role = "gap" })
@@ -700,33 +798,37 @@ function script:Render-Frame {
 
     # In-progress streaming message
     if ($streamState -and -not $streamState.Done) {
-        $label = "Nautilus"
-        $prefix = (Bold "$label " $th.assistant) + (Themed ([string]([char]0x203A) + " ") $th.assistant)
-        $prefixLen = 8
-        $partial = $streamState.Full.ToString()
+        $prefix = (Bold "Nautilus " $th.assistant) + (Themed ([string]([char]0x203A) + " ") 'assistant')
+        $prefixLen = [Math]::Max(2, (VisibleLen $prefix))
+        $partial = Get-StreamFullText $streamState
         if ([string]::IsNullOrEmpty($partial)) {
             $sp = $script:Spinner[$spinIdx % $script:Spinner.Count]
-            $lines.Add(@{ text = $prefix + (Themed "$sp $thinkingMsg" $th.assistant); role = "assistant" })
+            $msg = if ($thinkingMsg) { $thinkingMsg } else { "thinking..." }
+            $lines.Add(@{ text = $prefix + (Themed "$sp $msg" 'assistant'); role = "assistant" })
         } else {
             $wrapped = Wrap-Text -text $partial -width ($chatWidth - $prefixLen)
             $first = $true
             foreach ($wl in $wrapped) {
                 if ($first) {
-                    $lines.Add(@{ text = $prefix + (Themed $wl $th.assistant); role = "assistant" })
+                    $lines.Add(@{ text = $prefix + (Themed $wl 'assistant'); role = "assistant" })
                     $first = $false
                 } else {
-                    $lines.Add(@{ text = (" " * $prefixLen) + (Themed $wl $th.assistant); role = "assistant" })
+                    $lines.Add(@{ text = (" " * $prefixLen) + (Themed $wl 'assistant'); role = "assistant" })
                 }
             }
             $sp = $script:Spinner[$spinIdx % $script:Spinner.Count]
-            $lines.Add(@{ text = (" " * $prefixLen) + (Themed "$sp " $th.dim); role = "assistant" })
+            $lines.Add(@{ text = (" " * $prefixLen) + (Themed "$sp" 'dim'); role = "assistant" })
         }
-    } elseif ($streamState -and $streamState.Done -and -not [string]::IsNullOrEmpty($streamState.Error) -and [string]::IsNullOrEmpty($streamState.Full.ToString())) {
-        $lines.Add(@{ text = (Bold "Nautilus " $th.assistant) + (Themed ([string]([char]0x203A) + " ") $th.assistant) + (Themed "Connection issue: $($streamState.Error)" $th.error); role = "assistant" })
+    } elseif ($streamState -and $streamState.Done) {
+        $fullStr = Get-StreamFullText $streamState
+        if (-not [string]::IsNullOrEmpty($streamState.Error) -and [string]::IsNullOrEmpty($fullStr)) {
+            $prefix = (Bold "Nautilus " $th.assistant) + (Themed ([string]([char]0x203A) + " ") 'assistant')
+            $lines.Add(@{ text = $prefix + (Themed (Format-ApiError $streamState.Error) 'error'); role = "assistant" })
+        }
     }
 
     # Empty state: home screen
-    if ($messages.Count -eq 0 -and -not $streamState) {
+    if ((@($messages).Count -eq 0) -and -not $streamState) {
         $lines.Clear()
         $lines.Add(@{ text = ""; role = "gap" })
         $lines.Add(@{ text = (Themed "  Daddy, welcome back." 'bright'); role = "assistant" })
@@ -743,36 +845,61 @@ function script:Render-Frame {
         $lines.Add(@{ text = (Dim "  Or just start typing, Daddy."); role = "system" })
     }
 
-    # Render
-    Clear-Screen
-    Write-At 1 1 $topLine
-    Write-At 2 1 $borderTop
+    # ---- Paint (home + clear-eol; avoid full 2J flicker) ----
+    Write-Host "$script:Esc[H" -NoNewline
+    Write-At 1 1 $topLine -ClearEol
+    Write-At $borderRowT 1 $borderTop -ClearEol
 
     $total = $lines.Count
     $maxStart = [Math]::Max(0, $total - $chatHeight)
     $script:LastMaxStart = $maxStart
-    $start = [Math]::Min($scrollOffset, $maxStart)
+    if ($scrollOffset -ge [int]::MaxValue -or $scrollOffset -lt 0) {
+        $start = $maxStart   # pin to bottom
+    } else {
+        $start = [Math]::Min([Math]::Max(0, $scrollOffset), $maxStart)
+    }
     if ($total -le $chatHeight) { $start = 0 }
-    $visible = $lines[$start..([Math]::Min($total - 1, $start + $chatHeight - 1))]
+
     $r = $chatTop
-    foreach ($ln in $visible) {
-        Write-At $r 2 $ln.text
+    if ($total -gt 0) {
+        $endIdx = [Math]::Min($total - 1, $start + $chatHeight - 1)
+        for ($i = $start; $i -le $endIdx; $i++) {
+            Write-At $r 2 $lines[$i].text -ClearEol
+            $r++
+        }
+    }
+    # Clear any leftover rows in the chat viewport
+    while ($r -le $chatBottom) {
+        Write-At $r 1 "" -ClearEol
         $r++
     }
 
-    Write-At ($h - 2) 1 $borderBot
+    Write-At $borderRowB 1 $borderBot -ClearEol
 
-    # status line
-    $statusText = (Themed ([string]([char]0x25C9)) 'good') + (Themed " online" 'dim') + (Themed "  |  theme: $($script:Config.theme)" 'dim') + (Themed "  |  $([char]0x2191)/$([char]0x2193) scroll  |  Esc exit" 'dim')
-    if ($notice) { $statusText = (Themed $notice 'warn') }
-    Write-At $statusRow 1 $statusText
+    # status line (rotating flavour when idle; notice overrides)
+    $themeName = if ($script:Config -and $script:Config.theme) { $script:Config.theme } else { "Nautilus" }
+    if ($notice) {
+        $statusText = (Themed $notice 'warn')
+    } elseif ($streamState -and -not $streamState.Done) {
+        $sp = $script:Spinner[$spinIdx % $script:Spinner.Count]
+        $msg = if ($thinkingMsg) { $thinkingMsg } else { "working..." }
+        $statusText = (Themed "$sp $msg" 'accent')
+    } else {
+        $flavour = $script:StatusLines[$script:StatusIdx % $script:StatusLines.Count]
+        $statusText = (Themed ([string]([char]0x25C9)) 'good') + (Themed " online" 'dim') + (Themed "  |  $themeName" 'dim') + (Themed "  |  $flavour" 'dim')
+    }
+    # Truncate status to width
+    if ((VisibleLen $statusText) -gt ($w - 1)) {
+        # keep it simple: rely on ClearEol; oversize ANSI is rare
+    }
+    Write-At $statusRow 1 $statusText -ClearEol
 
-    # input line
+    # input line — always clear EOL so shortening the buffer leaves no ghosts
     $prompt = (Themed ([string]([char]0x25B6) + " ") 'accent')
-    $buf = $inputBuffer
-    $maxBuf = $w - 3
+    $buf = if ($null -eq $inputBuffer) { "" } else { $inputBuffer }
+    $maxBuf = [Math]::Max(1, $w - 4)
     if ($buf.Length -gt $maxBuf) { $buf = $buf.Substring($buf.Length - $maxBuf) }
-    Write-At $inputRow 1 ("$prompt$buf ")
+    Write-At $inputRow 1 ("$prompt$buf") -ClearEol
 }
 
 function script:Show-Startup {
@@ -806,12 +933,31 @@ function script:Show-Startup {
 function script:Run-TUI {
     $script:Config = Load-Config
     $script:CurrentTheme = $script:Themes[$script:Config.theme]
-    if (-not $script:CurrentTheme) { $script:CurrentTheme = $script:Themes["Midnight"]; $script:Config.theme        = "Midnight" }
+    if (-not $script:CurrentTheme) {
+        $script:CurrentTheme = $script:Themes["Nautilus"]
+        $script:Config.theme = "Nautilus"
+    }
 
     Enable-VT
-    $messages = Load-History
-    foreach ($m in $messages) { if (-not $m.PSObject.Properties['content']) { $m | Add-Member -NotePropertyName content -NotePropertyValue "" } }
+    $messages = @(Load-History)
+    foreach ($m in $messages) {
+        if (-not ($m.PSObject.Properties.Name -contains 'content')) {
+            $m | Add-Member -NotePropertyName content -NotePropertyValue "" -Force
+        }
+    }
 
+    $script:LastMaxStart = 0
+    $script:StatusIdx = 0
+    $script:TuiForceExit = $false
+    $streamState = $null
+
+    # Ensure alternate screen is restored even on Ctrl+C / terminating errors
+    trap {
+        try { Exit-TUI } catch { }
+        break
+    }
+
+    Register-TuiCancelHandler
     try {
         Enter-TUI
         Show-Startup
@@ -819,12 +965,34 @@ function script:Run-TUI {
         $notice = ""
         $spinIdx = 0
         $thinkIdx = 0
-        $scrollOffset = [int]::MaxValue
+        $scrollOffset = [int]::MaxValue   # pin-to-bottom sentinel
         $running = $true
+        $idleTicks = 0
 
         while ($running) {
+            if ($script:TuiForceExit) { $running = $false; break }
+
+            # Rotate flavour status every few idle frames
+            $idleTicks++
+            if ($idleTicks -ge 1) {
+                # StatusIdx advances when we re-render after key; bump occasionally via key wait is fine
+            }
             Render-Frame -messages $messages -inputBuffer $inputBuffer -scrollOffset $scrollOffset -streamState $null -spinIdx $spinIdx -thinkingMsg "" -notice $notice
             $notice = ""
+
+            $waitTicks = 0
+            while (-not [Console]::KeyAvailable) {
+                if ($script:TuiForceExit) { break }
+                Start-Sleep -Milliseconds 50
+                $waitTicks++
+                # Re-paint every ~1.2s so status flavour lines rotate while idle
+                if ($waitTicks -ge 24) {
+                    $waitTicks = 0
+                    $script:StatusIdx = ($script:StatusIdx + 1) % [Math]::Max(1, $script:StatusLines.Count)
+                    Render-Frame -messages $messages -inputBuffer $inputBuffer -scrollOffset $scrollOffset -streamState $null -spinIdx $spinIdx -thinkingMsg "" -notice ""
+                }
+            }
+            if ($script:TuiForceExit) { $running = $false; break }
 
             $key = [Console]::ReadKey($true)
 
@@ -880,7 +1048,13 @@ function script:Run-TUI {
                                 $streamState = Invoke-GeminiStream -Contents $contents -Model $script:Config.model -Temperature 0.35 -SystemPrompt $script:ImproveSystemPrompt
 
                                 $spinIdx = 0
+                                $cancelled = $false
                                 while (-not $streamState.Done) {
+                                    if ($script:TuiForceExit) { $cancelled = $true; break }
+                                    if ([Console]::KeyAvailable) {
+                                        $ck = [Console]::ReadKey($true)
+                                        if ($ck.Key -eq "Escape") { $cancelled = $true; break }
+                                    }
                                     Render-Frame -messages $messages -inputBuffer "" -scrollOffset ([int]::MaxValue) `
                                                  -streamState $streamState -spinIdx $spinIdx `
                                                  -thinkingMsg "Reading my own code, Daddy..." -notice ""
@@ -888,14 +1062,23 @@ function script:Run-TUI {
                                     Start-Sleep -Milliseconds 70
                                 }
 
-                                $final = $streamState.Full.ToString().Trim()
-                                if ($final) {
-                                    $messages = @($messages) + [pscustomobject]@{ role='assistant'; content=$final }
+                                if ($cancelled) {
+                                    Dispose-StreamState $streamState
+                                    $streamState = $null
+                                    $notice = "improve cancelled"
+                                    if ($script:TuiForceExit) { $running = $false }
                                 } else {
-                                    $messages = @($messages) + [pscustomobject]@{ role='system'; content=(Format-ApiError $streamState.Error) }
+                                    $final = ""
+                                    try { $final = $streamState.Full.ToString().Trim() } catch { }
+                                    if ($final) {
+                                        $messages = @($messages) + [pscustomobject]@{ role='assistant'; content=$final }
+                                    } else {
+                                        $messages = @($messages) + [pscustomobject]@{ role='system'; content=(Format-ApiError $streamState.Error) }
+                                    }
+                                    Dispose-StreamState $streamState
+                                    $streamState = $null
+                                    Save-History -messages $messages -max $script:Config.maxHistory
                                 }
-                                Dispose-StreamState $streamState
-                                Save-History -messages $messages -max $script:Config.maxHistory
                             }
                         }
                         'model'   {
@@ -929,10 +1112,12 @@ function script:Run-TUI {
                             if ($argLower -eq 'on' -or $argLower -eq 'true' -or $argLower -eq '1') {
                                 $cfg.enableSearch = $true
                                 Save-Config $cfg
+                                $script:Config = $cfg
                                 $notice = "search grounding ON"
                             } elseif ($argLower -eq 'off' -or $argLower -eq 'false' -or $argLower -eq '0') {
                                 $cfg.enableSearch = $false
                                 Save-Config $cfg
+                                $script:Config = $cfg
                                 $notice = "search grounding OFF"
                             } else {
                                 $state = if ($cfg.enableSearch) { "ON" } else { "OFF" }
@@ -952,38 +1137,63 @@ function script:Run-TUI {
                 $contents = Build-Contents -messages $messages
                 $streamState = Invoke-GeminiStream -Contents $contents -Model $script:Config.model -Temperature $script:Config.temperature -SystemPrompt $script:SystemPrompt
 
-                $spinIdx = 0; $thinkIdx = (Get-Random -Minimum 0 -Maximum $script:ThinkingLines.Count)
-                $lastChunkCount = 0
+                $spinIdx = 0
+                $thinkIdx = (Get-Random -Minimum 0 -Maximum $script:ThinkingLines.Count)
+                $thinkTick = 0
                 $started = $false
+                $cancelled = $false
                 while (-not $streamState.Done) {
+                    if ($script:TuiForceExit) { $cancelled = $true; break }
+                    # Allow Esc to cancel in-flight request
+                    if ([Console]::KeyAvailable) {
+                        $ck = [Console]::ReadKey($true)
+                        if ($ck.Key -eq "Escape") { $cancelled = $true; break }
+                    }
                     $thinking = $script:ThinkingLines[$thinkIdx % $script:ThinkingLines.Count]
                     Render-Frame -messages $messages -inputBuffer "" -scrollOffset ([int]::MaxValue) -streamState $streamState -spinIdx $spinIdx -thinkingMsg $thinking -notice ""
                     $spinIdx++
-                    if ($streamState.Chunks.Count -gt 0) { $started = $true }
-                    else { $thinkIdx++ }
-                    Start-Sleep -Milliseconds 80
+                    $thinkTick++
+                    if ($streamState.Chunks.Count -gt 0) {
+                        $started = $true
+                    } elseif (($thinkTick % 8) -eq 0) {
+                        $thinkIdx++
+                    }
+                    Start-Sleep -Milliseconds 70
                 }
-                # drain any final chunks
-                if (-not $started -and [string]::IsNullOrEmpty($streamState.Full.ToString()) -and $streamState.Error) {
-                    # streaming failed entirely -> fallback
+
+                if ($cancelled) {
                     Dispose-StreamState $streamState
+                    $streamState = $null
+                    $notice = "request cancelled"
+                    if ($script:TuiForceExit) { $running = $false }
+                    continue
+                }
+
+                $fullStr = ""
+                try { $fullStr = $streamState.Full.ToString() } catch { $fullStr = "" }
+
+                if (-not $started -and [string]::IsNullOrEmpty($fullStr) -and $streamState.Error) {
+                    # streaming failed entirely -> non-streaming fallback
+                    Dispose-StreamState $streamState
+                    $streamState = $null
                     $fbText, $fbErr = Invoke-GeminiFallback -Contents $contents -Model $script:Config.model -Temperature $script:Config.temperature -SystemPrompt $script:SystemPrompt
                     if ($fbText) {
-                        $messages += [pscustomobject]@{ role='assistant'; content=$fbText }
+                        $messages = @($messages) + [pscustomobject]@{ role='assistant'; content=$fbText }
                     } else {
                         $messages = @($messages) + [pscustomobject]@{ role='system'; content=(Format-ApiError $fbErr) }
                     }
                 } else {
-                    $finalText = $streamState.Full.ToString().Trim()
+                    $finalText = $fullStr.Trim()
                     if ([string]::IsNullOrEmpty($finalText) -and $streamState.Error) {
                         $messages = @($messages) + [pscustomobject]@{ role='system'; content=(Format-ApiError $streamState.Error) }
                     } elseif ([string]::IsNullOrEmpty($finalText)) {
-                        $messages += [pscustomobject]@{ role='system'; content="No response came back, Daddy. Try again." }
+                        $messages = @($messages) + [pscustomobject]@{ role='system'; content="No response came back, Daddy. Try again." }
                     } else {
                         $messages = @($messages) + [pscustomobject]@{ role='assistant'; content=$finalText }
                     }
+                    Dispose-StreamState $streamState
+                    $streamState = $null
                 }
-                Dispose-StreamState $streamState
                 Save-History -messages $messages -max $script:Config.maxHistory
                 continue
             } elseif ($key.Key -eq "Backspace") {
@@ -1028,6 +1238,10 @@ function script:Run-TUI {
                         $scrollOffset = $next
                     }
                 }
+            } elseif ($key.Key -eq "Home") {
+                $scrollOffset = 0
+            } elseif ($key.Key -eq "End") {
+                $scrollOffset = [int]::MaxValue
             } else {
                 $ch = $key.KeyChar
                 if (-not [char]::IsControl($ch) -and $ch -ne [char]0) {
@@ -1036,7 +1250,9 @@ function script:Run-TUI {
             }
         }
     } finally {
+        try { if ($streamState) { Dispose-StreamState $streamState } } catch { }
         Exit-TUI
+        Unregister-TuiCancelHandler
     }
 }
 
@@ -1069,14 +1285,18 @@ Shell commands:
 
 function script:Get-ConfigText {
     $cfg = Load-Config
-    $keyStatus = if ($cfg.apiKey) { "set (cached)" } else { "not set" }
-    $gist = if ($cfg.keyUrl) { $cfg.keyUrl } elseif ($script:KeyGistUrl -notmatch '<GIST_ID>') { $script:KeyGistUrl } else { "not configured (set keyUrl or gist id)" }
+    $keyStatus = if ($cfg.apiKey) { "set (cached)" } else { "not set (proxy mode OK)" }
+    $proxy = if ($cfg.proxyUrl) { $cfg.proxyUrl } else { "(direct Gemini)" }
+    $search = if ($cfg.enableSearch) { "ON" } else { "OFF" }
+    $gist = if ($cfg.keyUrl) { $cfg.keyUrl } elseif ($script:KeyGistUrl -notmatch '<GIST_ID>') { "(bundled gist)" } else { "not configured" }
     return @"
 Nautilus configuration
   model       : $($cfg.model)
   theme       : $($cfg.theme)
   temperature : $($cfg.temperature)
   maxHistory  : $($cfg.maxHistory)
+  search      : $search
+  proxy       : $proxy
   api key     : $keyStatus
   gist source : $gist
   config file : $script:ConfigFile
@@ -1084,6 +1304,7 @@ Nautilus configuration
   install     : $script:ModuleRoot
 
 Edit by running: nautilus config edit
+  Toggle search in TUI: /search on|off
 "@
 }
 
@@ -1098,24 +1319,38 @@ function script:Invoke-Ask {
     )
     $contents = Build-Contents -messages $messages
     $esc = $script:Esc
-    Write-Host "$esc[38;5;117mDaddy$esc[0m $esc[38;5;240m>$esc[0m $message" 
-    $streamState = Invoke-GeminiStream -Contents $contents -Model $cfg.model -Temperature $cfg.temperature -SystemPrompt $script:SystemPrompt
-    $spin = 0
-    while (-not $streamState.Done) {
-        $sp = $script:Spinner[$spin % $script:Spinner.Count]
-        Write-Host "`r$esc[38;5;81m$sp thinking...$esc[0m    " -NoNewline
-        $spin++
-        Start-Sleep -Milliseconds 80
+    Write-Host "$esc[38;5;117mDaddy$esc[0m $esc[38;5;240m>$esc[0m $message"
+    $streamState = $null
+    try {
+        $streamState = Invoke-GeminiStream -Contents $contents -Model $cfg.model -Temperature $cfg.temperature -SystemPrompt $script:SystemPrompt
+        $spin = 0
+        $thinkIdx = Get-Random -Minimum 0 -Maximum $script:ThinkingLines.Count
+        while (-not $streamState.Done) {
+            $sp = $script:Spinner[$spin % $script:Spinner.Count]
+            $msg = $script:ThinkingLines[$thinkIdx % $script:ThinkingLines.Count]
+            $line = "$esc[38;5;81m$sp $msg$esc[0m"
+            Write-Host "`r$line$esc[K" -NoNewline
+            $spin++
+            if (($spin % 10) -eq 0) { $thinkIdx++ }
+            Start-Sleep -Milliseconds 80
+        }
+        Write-Host "`r$esc[K" -NoNewline
+        $full = ""
+        try { $full = $streamState.Full.ToString().Trim() } catch { }
+        if (-not [string]::IsNullOrEmpty($full)) {
+            Write-Host "$esc[38;5;81mNautilus$esc[0m $esc[38;5;240m>$esc[0m $full"
+        } elseif ($streamState.Error) {
+            Dispose-StreamState $streamState
+            $streamState = $null
+            $txt, $err = Invoke-GeminiFallback -Contents $contents -Model $cfg.model -Temperature $cfg.temperature -SystemPrompt $script:SystemPrompt
+            if ($txt) { Write-Host "$esc[38;5;81mNautilus$esc[0m $esc[38;5;240m>$esc[0m $txt" }
+            else { Write-Host "$esc[38;5;203mNautilus: $(Format-ApiError $err)$esc[0m" }
+        } else {
+            Write-Host "$esc[38;5;203mNautilus: No response came back, Daddy. Try again.$esc[0m"
+        }
+    } finally {
+        if ($streamState) { Dispose-StreamState $streamState }
     }
-    Write-Host "`r" -NoNewline
-    if (-not [string]::IsNullOrEmpty($streamState.Full.ToString())) {
-        Write-Host "$esc[38;5;81mNautilus$esc[0m $esc[38;5;240m>$esc[0m $($streamState.Full.ToString().Trim())"
-    } elseif ($streamState.Error) {
-        $txt, $err = Invoke-GeminiFallback -Contents $contents -Model $cfg.model -Temperature $cfg.temperature -SystemPrompt $script:SystemPrompt
-        if ($txt) { Write-Host "$esc[38;5;81mNautilus$esc[0m $esc[38;5;240m>$esc[0m $txt" }
-        else { Write-Host "$esc[38;5;203mNautilus: $(Format-ApiError $err)$esc[0m" }
-    }
-    Dispose-StreamState $streamState
 }
 
 # ===========================================================================
@@ -1133,13 +1368,17 @@ function script:Run-Config {
     Write-Host (Wc "  theme       : $($cfg.theme)" 81)
     Write-Host (Wc "  temperature : $($cfg.temperature)" 81)
     Write-Host (Wc "  maxHistory  : $($cfg.maxHistory)" 81)
-    $keyStatus = if ($cfg.apiKey) { "set (cached)" } else { "not set" }
+    $searchState = if ($cfg.enableSearch) { "ON" } else { "OFF" }
+    Write-Host (Wc "  search      : $searchState" 81)
+    $proxyShow = if ($cfg.proxyUrl) { $cfg.proxyUrl } else { "(none)" }
+    Write-Host (Wc "  proxy       : $proxyShow" 81)
+    $keyStatus = if ($cfg.apiKey) { "set (cached)" } else { "not set (proxy mode OK)" }
     Write-Host (Wc "  api key     : $keyStatus" 81)
     Write-Host (Wc "  config file : $script:ConfigFile" 245)
     Write-Host (Wc "  history     : $script:HistoryFile" 245)
     Write-Host (Wc "  install     : $script:ModuleRoot" 245)
     Write-Host ""
-    Write-Host (Wc "  Available themes: " 245 + (($script:Themes.Keys -join ", ")))
+    Write-Host ((Wc "  Available themes: " 245) + (Wc ($script:Themes.Keys -join ", ") 81))
     Write-Host ""
     if ($action -eq "edit") {
         $newModel = Read-Host (Wc "  Set model (enter to keep [$($cfg.model)])" 240)
@@ -1149,12 +1388,20 @@ function script:Run-Config {
         if ($newTheme -and $script:Themes.Contains($newTheme)) { $cfg.theme = $newTheme }
         $newTemp = Read-Host (Wc "  Set temperature (enter to keep [$($cfg.temperature)])" 240)
         if ($newTemp) { try { $cfg.temperature = [double]$newTemp } catch {} }
+        $searchCur = if ($cfg.enableSearch) { "on" } else { "off" }
+        $newSearch = Read-Host (Wc "  Search grounding on/off (enter to keep [$searchCur])" 240)
+        if ($newSearch) {
+            $ns = $newSearch.Trim().ToLower()
+            if ($ns -in @('on','true','1','yes')) { $cfg.enableSearch = $true }
+            elseif ($ns -in @('off','false','0','no')) { $cfg.enableSearch = $false }
+        }
         Write-Host (Wc "  Set keyUrl (gist raw URL, enter to keep)" 240)
         $newUrl = Read-Host
         if ($newUrl) { $cfg.keyUrl = $newUrl; $cfg.apiKey = "" }
         $pasteKey = Read-Host (Wc "  Or paste a key directly (enter to skip)" 240)
         if ($pasteKey) { $cfg.apiKey = $pasteKey.Trim() }
         Save-Config $cfg
+        $script:Config = $cfg
         Write-Host ""
         Write-Host (Wc "  Saved, Daddy." 117)
         Write-Host ""
@@ -1191,22 +1438,29 @@ function script:Run-Theme {
 function script:Run-Update {
     $esc = $script:Esc
     Write-Host "$esc[38;5;81m  Updating Nautilus from $script:RepoBase ...$esc[0m"
-    & {
-        param($InstallRoot,$RepoBase)
+    $InstallRoot = $script:InstallRoot
+    $RepoBase = $script:RepoBase
+    $moduleDir = Join-Path $InstallRoot "Nautilus"
+    if (-not (Test-Path $moduleDir)) {
+        New-Item -ItemType Directory -Path $moduleDir -Force | Out-Null
+    }
+    try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
-        foreach ($f in @("Nautilus.psd1","Nautilus.psm1")) {
-            $url = "$RepoBase/Nautilus/$f"
-            $dest = Join-Path $InstallRoot "Nautilus" $f
-            try {
-                Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing -ErrorAction Stop
-                if (Get-Command Unblock-File -ErrorAction SilentlyContinue) { Unblock-File $dest }
-                Write-Host "$esc[38;5;245m  refreshed $f$esc[0m"
-            } catch {
-                Write-Host "$esc[38;5;203m  failed to update $f : $($_.Exception.Message)$esc[0m"
-            }
+    } catch { }
+    foreach ($f in @("Nautilus.psd1", "Nautilus.psm1")) {
+        $url = "$RepoBase/Nautilus/$f"
+        $dest = Join-Path $moduleDir $f
+        try {
+            Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing -ErrorAction Stop
+            if (Get-Command Unblock-File -ErrorAction SilentlyContinue) { Unblock-File $dest }
+            Write-Host "$esc[38;5;245m  refreshed $f$esc[0m"
+        } catch {
+            Write-Host "$esc[38;5;203m  failed to update $f : $($_.Exception.Message)$esc[0m"
         }
-        try { Import-Module (Join-Path $InstallRoot "Nautilus" "Nautilus.psd1") -Force -ErrorAction Stop } catch {}
-    } $script:InstallRoot $script:RepoBase
+    }
+    try {
+        Import-Module (Join-Path $moduleDir "Nautilus.psd1") -Force -ErrorAction Stop
+    } catch { }
     Write-Host "$esc[38;5;117m  Nautilus is up to date, Daddy.$esc[0m"
 }
 
