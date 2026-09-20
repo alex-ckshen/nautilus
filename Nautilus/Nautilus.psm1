@@ -2,10 +2,10 @@
     Nautilus - a pure-PowerShell futuristic TUI AI assistant.
     JARVIS-style personality, Gemini-powered, blue sci-fi aesthetic.
     Public command: nautilus  (alias: naut)
-    Version: 1.0.1
+    Version: 0.3.43.0
 #>
 
-$script:NautilusVersion = "1.0.1"
+$script:NautilusVersion = "0.3.43.0"
 $script:TuiActive = $false
 $script:TuiForceExit = $false
 $script:CancelHandlerRegistered = $false
@@ -459,6 +459,7 @@ function script:Invoke-GeminiStream {
 
     $ps = [scriptblock]::Create({
         param($url, $body, $state)
+        $req = $null; $resp = $null; $reader = $null
         try {
             $req = [System.Net.HttpWebRequest]::Create($url)
             $req.Method = "POST"
@@ -491,17 +492,19 @@ function script:Invoke-GeminiStream {
                 if ($parts) {
                     foreach ($p in $parts) {
                         if ($p.text) {
-                            [void]$state.Full.Append($p.text)
+                            [System.Threading.Monitor]::Enter($state.Full)
+                            try { [void]$state.Full.Append($p.text) }
+                            finally { [System.Threading.Monitor]::Exit($state.Full) }
                             $state.Chunks.Enqueue($p.text)
                         }
                     }
                 }
             }
-            $reader.Close()
-            $resp.Close()
         } catch {
             $state.Error = $_.Exception.Message
         } finally {
+            try { if ($reader) { $reader.Close() } } catch { }
+            try { if ($resp) { $resp.Close() } } catch { }
             $state.Done = $true
         }
     })
@@ -552,6 +555,18 @@ function script:Dispose-StreamState {
     $state._Handle = $null
     $state._PowerShell = $null
     $state._Runspace = $null
+}
+
+function script:Get-StreamFullText {
+    param($state)
+    if ($null -eq $state -or $null -eq $state.Full) { return "" }
+    try {
+        [System.Threading.Monitor]::Enter($state.Full)
+        try { return $state.Full.ToString() }
+        finally { [System.Threading.Monitor]::Exit($state.Full) }
+    } catch {
+        try { return $state.Full.ToString() } catch { return "" }
+    }
 }
 
 function script:Invoke-GeminiFallback {
@@ -671,12 +686,18 @@ function script:Exit-TUI {
 
 function script:Register-TuiCancelHandler {
     # Restore alternate screen on Ctrl+C. Safe to call multiple times.
+    # Inline ANSI here: event handlers may not resolve module script: functions.
     if ($script:CancelHandlerRegistered) { return }
     try {
         $script:CancelHandler = [ConsoleCancelEventHandler]{
             param($sender, $e)
             $e.Cancel = $true
-            try { Exit-TUI } catch { }
+            try {
+                $esc = [char]27
+                [Console]::Write("$esc[?1049l$esc[?25h$esc[0m")
+                [Console]::CursorVisible = $true
+            } catch { }
+            $script:TuiActive = $false
             $script:TuiForceExit = $true
         }
         [Console]::add_CancelKeyPress($script:CancelHandler)
@@ -981,8 +1002,11 @@ function script:Run-TUI {
             $notice = ""
 
             $waitTicks = 0
-            while (-not [Console]::KeyAvailable) {
+            $keyReady = $false
+            while (-not $keyReady) {
                 if ($script:TuiForceExit) { break }
+                try { $keyReady = [Console]::KeyAvailable } catch { $keyReady = $true }
+                if ($keyReady) { break }
                 Start-Sleep -Milliseconds 50
                 $waitTicks++
                 # Re-paint every ~1.2s so status flavour lines rotate while idle
@@ -1068,8 +1092,7 @@ function script:Run-TUI {
                                     $notice = "improve cancelled"
                                     if ($script:TuiForceExit) { $running = $false }
                                 } else {
-                                    $final = ""
-                                    try { $final = $streamState.Full.ToString().Trim() } catch { }
+                                    $final = (Get-StreamFullText $streamState).Trim()
                                     if ($final) {
                                         $messages = @($messages) + [pscustomobject]@{ role='assistant'; content=$final }
                                     } else {
@@ -1169,8 +1192,7 @@ function script:Run-TUI {
                     continue
                 }
 
-                $fullStr = ""
-                try { $fullStr = $streamState.Full.ToString() } catch { $fullStr = "" }
+                $fullStr = Get-StreamFullText $streamState
 
                 if (-not $started -and [string]::IsNullOrEmpty($fullStr) -and $streamState.Error) {
                     # streaming failed entirely -> non-streaming fallback
@@ -1335,8 +1357,7 @@ function script:Invoke-Ask {
             Start-Sleep -Milliseconds 80
         }
         Write-Host "`r$esc[K" -NoNewline
-        $full = ""
-        try { $full = $streamState.Full.ToString().Trim() } catch { }
+        $full = (Get-StreamFullText $streamState).Trim()
         if (-not [string]::IsNullOrEmpty($full)) {
             Write-Host "$esc[38;5;81mNautilus$esc[0m $esc[38;5;240m>$esc[0m $full"
         } elseif ($streamState.Error) {
