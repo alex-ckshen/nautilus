@@ -2,10 +2,10 @@
     Nautilus - a pure-PowerShell futuristic TUI AI assistant.
     JARVIS-style personality, Gemini-powered, blue sci-fi aesthetic.
     Public command: nautilus  (alias: naut)
-    Version: 0.4.2.2
+    Version: 0.4.2.3
 #>
 
-$script:NautilusVersion = "0.4.2.2"
+$script:NautilusVersion = "0.4.2.3"
 $script:TuiActive = $false
 $script:TuiForceExit = $false
 $script:CancelHandlerRegistered = $false
@@ -1636,7 +1636,7 @@ function script:Invoke-PendingUpdateApply {
     } catch { }
     if (-not $shown) { $shown = $target }
     if ($shown) {
-        Write-Host "$esc[38;5;117m  Updated to v$shown -- close this window, open a new PowerShell, then run nautilus$esc[0m"
+        Write-Host "$esc[38;5;117m  Updated to v$shown -- this window will close; open a new PowerShell and run nautilus$esc[0m"
     } else {
         Write-Host "$esc[38;5;117m  Update finished -- close this window, open a new PowerShell, then run nautilus$esc[0m"
     }
@@ -3906,8 +3906,12 @@ function script:Run-Update {
     } else {
         Write-Host "$esc[38;5;117m  Files updated.$esc[0m"
     }
-    Write-Host "$esc[38;5;221m  Close this PowerShell window and open a new one, then run: nautilus$esc[0m"
-    Write-Host "$esc[38;5;245m  (In-session reload after self-update breaks PS 5.1 module scope.)$esc[0m"
+    Write-Host "$esc[38;5;221m  Closing this window so the old module cannot stay loaded.$esc[0m"
+    Write-Host "$esc[38;5;245m  Open a NEW PowerShell, then run: nautilus$esc[0m"
+    Write-Host "$esc[38;5;245m  (PS 5.1 cannot safely reload Nautilus in the same session.)$esc[0m"
+    # Force a new process — typing `naut` again here would still run the old in-memory module.
+    try { Start-Sleep -Milliseconds 800 } catch { }
+    exit 0
 }
 
 function script:Run-Uninstall {
@@ -3962,12 +3966,37 @@ function script:Invoke-NautilusTui {
 }
 
 
+function script:Test-StaleModuleSession {
+    # Disk was updated but this PowerShell process still has the old module in memory.
+    try {
+        $manifest = Join-Path $script:ModuleRoot "Nautilus.psd1"
+        if (-not (Test-Path -LiteralPath $manifest)) { return $false }
+        $raw = Get-Content -LiteralPath $manifest -Raw -ErrorAction Stop
+        $disk = $null
+        if ($raw -match "ModuleVersion\s*=\s*'([^']+)'") { $disk = $Matches[1] }
+        elseif ($raw -match 'ModuleVersion\s*=\s*"([^"]+)"') { $disk = $Matches[1] }
+        if (-not $disk) { return $false }
+        if ((Compare-ModuleVersion -Left $disk -Right $script:NautilusVersion) -gt 0) {
+            $esc = $script:Esc
+            Write-Host ""
+            Write-Host "$esc[38;5;203m  This PowerShell session is still running Nautilus v$($script:NautilusVersion).$esc[0m"
+            Write-Host "$esc[38;5;221m  Disk already has v$disk (update applied), but PS 5.1 keeps the old module loaded.$esc[0m"
+            Write-Host "$esc[38;5;117m  Close this window completely, open a NEW PowerShell, then run: nautilus$esc[0m"
+            Write-Host ""
+            return $true
+        }
+    } catch { }
+    return $false
+}
+
 function nautilus {
     [CmdletBinding()]
     param(
         [Parameter(ValueFromRemainingArguments = $true)]
         [string[]]$Rest
     )
+
+    if (Test-StaleModuleSession) { return }
 
     $cmd = if ($Rest -and $Rest.Count -gt 0) { $Rest[0].ToLower() } else { "" }
     $rest = if ($Rest -and $Rest.Count -gt 1) { $Rest[1..($Rest.Count-1)] } else { @() }

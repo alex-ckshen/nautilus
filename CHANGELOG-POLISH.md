@@ -1,3 +1,8 @@
+# 0.4.2.3
+
+- **Self-update UX:** after a successful update, the shell **exits** so you cannot accidentally relaunch the old in-memory module in the same window.
+- If you somehow stay in a stale session, `nautilus`/`naut` detects disk version > loaded version and refuses to start until you open a new PowerShell.
+
 # 0.4.2.2
 
 - **Copy-code shortcut (P0 for Alex on WT):** Windows Terminal steals **Ctrl+Shift+C** for host Copy, so the app never sees it. Primary chords are now **F6** and **Ctrl+Alt+C** (plus **Ctrl+Shift+Y**). Ctrl+Shift+C kept as best-effort. **`/cc` / `/copycode` unchanged** (confirmed working).

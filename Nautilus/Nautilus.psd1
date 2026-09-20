@@ -1,6 +1,6 @@
 ﻿@{
     RootModule        = 'Nautilus.psm1'
-    ModuleVersion     = '0.4.2.2'
+    ModuleVersion     = '0.4.2.3'
     GUID              = '7f3c2a18-9b2e-4a71-8c55-3d2f1e0a9b8c'
     Author            = 'Alex Shen'
     CompanyName       = '_alex.shen'
