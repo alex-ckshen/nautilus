@@ -2,10 +2,10 @@
     Nautilus - a pure-PowerShell futuristic TUI AI assistant.
     JARVIS-style personality, Gemini-powered, blue sci-fi aesthetic.
     Public command: nautilus  (alias: naut)
-    Version: 0.4.2.4
+    Version: 0.4.2.5
 #>
 
-$script:NautilusVersion = "0.4.2.4"
+$script:NautilusVersion = "0.4.2.5"
 $script:TuiActive = $false
 $script:TuiForceExit = $false
 $script:CancelHandlerRegistered = $false
@@ -1398,14 +1398,11 @@ function script:Enable-VT {
                         [void]$type::SetConsoleMode($hOut, $mode -bor 0x0004)
                     }
                 }
-                # STDIN: ENABLE_VIRTUAL_TERMINAL_INPUT (0x200) so SGR mouse / CSI reach ReadKey
-                $hIn = $type::GetStdHandle(-10)
-                if ($hIn -ne [IntPtr]::Zero -and $hIn.ToInt64() -ne -1) {
-                    $modeIn = [uint32]0
-                    if ($type::GetConsoleMode($hIn, [ref]$modeIn)) {
-                        [void]$type::SetConsoleMode($hIn, $modeIn -bor 0x0200)
-                    }
-                }
+                # NOTE: do NOT set ENABLE_VIRTUAL_TERMINAL_INPUT (0x200).
+                # That flag made Enter/Esc arrive as raw CR / ESC without ConsoleKey.Enter
+                # / Escape, so the prompt bar and slash menu ignored them. ConPTY/WT still
+                # delivers CSI arrows + SGR mouse as ESC-sequences we parse below.
+                # VT *output* (0x4) stays enabled above for colors / mouse enable codes.
             }
         } catch { }
     }
@@ -1679,7 +1676,7 @@ function script:Try-ParseEscSequence {
     # Older mouse-only parser ate those bytes and returned $null -> Read-TuiEvent
     # fell through as Escape, so slash/menu selection never moved live.
     $buf = New-Object System.Text.StringBuilder
-    $deadline = [datetime]::UtcNow.AddMilliseconds(100)
+    $deadline = [datetime]::UtcNow.AddMilliseconds(40)
     try {
         while ([datetime]::UtcNow -lt $deadline) {
             $avail = $false
@@ -1798,9 +1795,16 @@ function script:Read-TuiEvent {
                 $key = [Console]::ReadKey($true)
             } catch { return $null }
 
-            # Escape may start an SGR mouse sequence — only peek when bytes follow
-            # (never call Try-ParseSgrMouse on bare Esc: that ate keys / delayed quit).
+            # Escape may start CSI (arrows / SGR mouse). Brief peek only — bare Esc
+            # must stay instant. Never drop Esc on parse failure (that broke dismiss/quit).
             if ($key.Key -eq 'Escape' -or $key.KeyChar -eq [char]27) {
+                $waitUntil = [datetime]::UtcNow.AddMilliseconds(25)
+                while ([datetime]::UtcNow -lt $waitUntil) {
+                    $more = $false
+                    try { $more = [Console]::KeyAvailable } catch { $more = $false }
+                    if ($more) { break }
+                    Start-Sleep -Milliseconds 1
+                }
                 $more = $false
                 try { $more = [Console]::KeyAvailable } catch { $more = $false }
                 if ($more) {
@@ -1816,17 +1820,25 @@ function script:Read-TuiEvent {
                             if ($seq.Kind -eq 'Key' -and $seq.Key) {
                                 return @{ Kind = 'Key'; Key = $seq.Key }
                             }
-                            # release / other - ignore
+                            # mouse release / unknown CSI payload — ignore, keep reading
                             continue
                         }
                     } catch {
-                        # esc-sequence parse must never kill the host
-                        continue
+                        # fall through to bare Escape
                     }
                 }
-                # plain Escape
-                return @{ Kind = 'Key'; Key = $key }
+                return @{ Kind = 'Key'; Key = (New-SynthKeyInfo -Key ([ConsoleKey]::Escape)) }
             }
+
+            # VT hosts sometimes deliver Enter as CR/LF without ConsoleKey.Enter —
+            # that made the prompt bar silently ignore Enter (control char, not appended).
+            if ($key.Key -eq 'Enter' -or $key.KeyChar -eq [char]13 -or $key.KeyChar -eq [char]10) {
+                $shift = (($key.Modifiers -band [ConsoleModifiers]::Shift) -ne 0)
+                $alt = (($key.Modifiers -band [ConsoleModifiers]::Alt) -ne 0)
+                $ctrl = (($key.Modifiers -band [ConsoleModifiers]::Control) -ne 0)
+                return @{ Kind = 'Key'; Key = (New-SynthKeyInfo -Key ([ConsoleKey]::Enter) -Shift:$shift -Alt:$alt -Control:$ctrl) }
+            }
+
             return @{ Kind = 'Key'; Key = $key }
         }
         if ($WaitMs -le 0) { return $null }
@@ -3139,7 +3151,7 @@ function script:Run-TUI {
                     continue
                 }
             }
-            if ($ev.Kind -ne 'Key' -or -not $ev.Key) { continue }
+            if ($ev.Kind -ne 'Key' -or $null -eq $ev.Key) { continue }
             $key = $ev.Key
 
             # Ctrl+U applies pending update (wins over any line-edit binding)

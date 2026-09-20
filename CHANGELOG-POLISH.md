@@ -1,3 +1,7 @@
+# 0.4.2.5
+
+- **Fix: Enter + Esc dead in prompt and slash menu** — `ENABLE_VIRTUAL_TERMINAL_INPUT` made Enter arrive as raw CR (no `ConsoleKey.Enter`) and Esc fight CSI/mouse peeks, so both were silently ignored. Removed that stdin flag; normalize CR/LF → Enter; bare Esc uses a 25ms CSI peek and is never dropped on parse failure. Arrow CSI + mouse SGR still work via ConPTY.
+
 # 0.4.2.4
 
 - **Fix: slash / menu arrow highlight not updating live** — with VT input enabled, ↑↓ arrive as `ESC [ A/B`. The mouse-only CSI drain ate those bytes and treated them as Escape, so the selector never moved until something else painted. Now `Try-ParseEscSequence` maps CSI arrows (and Home/End/PgUp/PgDn) to real keys; mouse SGR still works.
