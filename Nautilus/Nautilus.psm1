@@ -2,10 +2,10 @@
     Nautilus - a pure-PowerShell futuristic TUI AI assistant.
     JARVIS-style personality, Gemini-powered, blue sci-fi aesthetic.
     Public command: nautilus  (alias: naut)
-    Version: 0.4.1.2
+    Version: 0.4.1.3
 #>
 
-$script:NautilusVersion = "0.4.1.2"
+$script:NautilusVersion = "0.4.1.3"
 $script:TuiActive = $false
 $script:TuiForceExit = $false
 $script:CancelHandlerRegistered = $false
@@ -1340,9 +1340,9 @@ function script:Invoke-PendingUpdateApply {
     } catch { }
     if (-not $shown) { $shown = $target }
     if ($shown) {
-        Write-Host "$esc[38;5;117m  Updated to v$shown -- run nautilus again$esc[0m"
+        Write-Host "$esc[38;5;117m  Updated to v$shown -- close this window, open a new PowerShell, then run nautilus$esc[0m"
     } else {
-        Write-Host "$esc[38;5;117m  Update finished -- run nautilus again$esc[0m"
+        Write-Host "$esc[38;5;117m  Update finished -- close this window, open a new PowerShell, then run nautilus$esc[0m"
     }
     Write-Host ""
 }
@@ -3015,7 +3015,6 @@ function script:Run-Update {
     Write-Host "$esc[38;5;81m  Updating Nautilus from $script:RepoBase ...$esc[0m"
     $InstallRoot = $script:InstallRoot
     $RepoBase = $script:RepoBase
-    # Nested Join-Path for Windows PowerShell 5.1 (no 3-arg Join-Path)
     $moduleDir = Join-Path $InstallRoot "Nautilus"
     if (-not (Test-Path -LiteralPath $moduleDir)) {
         New-Item -ItemType Directory -Path $moduleDir -Force | Out-Null
@@ -3024,7 +3023,7 @@ function script:Run-Update {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
     } catch { }
 
-    function script:Get-NautilusRemoteFile {
+    function Get-NautilusRemoteFile {
         param([string]$Uri, [string]$OutFile)
         $dir = Split-Path -Parent $OutFile
         if ($dir -and -not (Test-Path -LiteralPath $dir)) {
@@ -3033,7 +3032,6 @@ function script:Run-Update {
         $errs = @()
         $downloaded = $false
 
-        # 1) Prefer native curl.exe / curl (never the Invoke-WebRequest alias)
         $curlPath = $null
         foreach ($candidate in @('curl.exe', 'curl', '/usr/bin/curl', '/bin/curl')) {
             $isPath = ($candidate.IndexOf([char]'/') -ge 0) -or ($candidate.IndexOf([char]'\') -ge 0)
@@ -3059,7 +3057,6 @@ function script:Run-Update {
             $errs += 'curl not found'
         }
 
-        # 2) HttpClient
         if (-not $downloaded) {
             try {
                 Add-Type -AssemblyName System.Net.Http -ErrorAction SilentlyContinue
@@ -3082,7 +3079,6 @@ function script:Run-Update {
             }
         }
 
-        # 3) Invoke-WebRequest on Windows
         if (-not $downloaded -and ($env:OS -eq 'Windows_NT')) {
             try {
                 Invoke-WebRequest -Uri $Uri -OutFile $OutFile -UseBasicParsing -ErrorAction Stop
@@ -3099,39 +3095,71 @@ function script:Run-Update {
         }
     }
 
-    $okCount = 0
-    foreach ($f in @("Nautilus.psd1", "Nautilus.psm1")) {
-        $url = "$RepoBase/Nautilus/$f"
-        $dest = Join-Path $moduleDir $f
-        try {
-            Get-NautilusRemoteFile -Uri $url -OutFile $dest
-            if (Get-Command Unblock-File -ErrorAction SilentlyContinue) {
-                Unblock-File -LiteralPath $dest -ErrorAction SilentlyContinue
-            }
-            Write-Host "$esc[38;5;245m  refreshed $f$esc[0m"
-            $okCount++
-        } catch {
-            Write-Host "$esc[38;5;203m  failed to update $f : $($_.Exception.Message)$esc[0m"
+    function Test-NautilusPsm1 {
+        param([string]$Path)
+        $tokens = $null
+        $errors = $null
+        [void][System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$errors)
+        if ($errors -and $errors.Count -gt 0) {
+            throw ("Parse failed: " + ($errors[0].ToString()))
+        }
+        $raw = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop
+        if ($raw -notmatch 'function\s+(script:)?Run-TUI\b') {
+            throw 'Downloaded module is missing Run-TUI'
+        }
+        if ($raw -notmatch 'function\s+nautilus\b') {
+            throw 'Downloaded module is missing nautilus'
         }
     }
 
-    $newVer = $null
-    if ($okCount -gt 0) {
-        try {
-            Import-Module (Join-Path $moduleDir "Nautilus.psd1") -Force -ErrorAction Stop
-            $newVer = $script:NautilusVersion
-        } catch {
-            Write-Host "$esc[38;5;221m  downloaded, but reload failed: $($_.Exception.Message)$esc[0m"
-            Write-Host "$esc[38;5;221m  Open a new PowerShell session to pick up the update.$esc[0m"
+    $tmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("nautilus-update-" + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+    $okCount = 0
+    $shownVer = $null
+    try {
+        foreach ($f in @("Nautilus.psd1", "Nautilus.psm1")) {
+            $url = "$RepoBase/Nautilus/$f"
+            $tmp = Join-Path $tmpDir $f
+            Get-NautilusRemoteFile -Uri $url -OutFile $tmp
+            if ($f -eq 'Nautilus.psm1') {
+                Test-NautilusPsm1 -Path $tmp
+            } elseif ($f -eq 'Nautilus.psd1') {
+                $raw = Get-Content -LiteralPath $tmp -Raw -ErrorAction Stop
+                if ($raw -match "ModuleVersion\s*=\s*'([^']+)'") { $shownVer = $Matches[1] }
+                elseif ($raw -match 'ModuleVersion\s*=\s*"([^"]+)"') { $shownVer = $Matches[1] }
+            }
+            Write-Host "$esc[38;5;245m  downloaded $f$esc[0m"
+            $okCount++
         }
+
+        foreach ($f in @("Nautilus.psd1", "Nautilus.psm1")) {
+            $src = Join-Path $tmpDir $f
+            $dest = Join-Path $moduleDir $f
+            Copy-Item -LiteralPath $src -Destination $dest -Force
+            if (Get-Command Unblock-File -ErrorAction SilentlyContinue) {
+                Unblock-File -LiteralPath $dest -ErrorAction SilentlyContinue
+            }
+            Write-Host "$esc[38;5;245m  installed $f$esc[0m"
+        }
+    } finally {
+        try { Remove-Item -LiteralPath $tmpDir -Recurse -Force -ErrorAction SilentlyContinue } catch { }
     }
-    if ($newVer) {
-        Write-Host "$esc[38;5;117m  Nautilus updated to v$newVer, Daddy.$esc[0m"
-    } elseif ($okCount -gt 0) {
-        Write-Host "$esc[38;5;117m  Nautilus files refreshed. Restart PowerShell to load the new version, Daddy.$esc[0m"
-    } else {
+
+    if ($okCount -lt 2) {
         Write-Host "$esc[38;5;203m  Update failed. Check your network and try again.$esc[0m"
+        return
     }
+
+    # CRITICAL: do NOT Import-Module -Force this module from inside itself on PS 5.1.
+    # That tears down private functions (Run-TUI) while leaving the exported nautilus
+    # command half-alive, which surfaces as: Run-TUI CommandNotFoundException.
+    if ($shownVer) {
+        Write-Host "$esc[38;5;117m  Files updated to v$shownVer.$esc[0m"
+    } else {
+        Write-Host "$esc[38;5;117m  Files updated.$esc[0m"
+    }
+    Write-Host "$esc[38;5;221m  Close this PowerShell window and open a new one, then run: nautilus$esc[0m"
+    Write-Host "$esc[38;5;245m  (In-session reload after self-update breaks PS 5.1 module scope.)$esc[0m"
 }
 
 function script:Run-Uninstall {
@@ -3156,6 +3184,36 @@ function script:Run-Uninstall {
 # ===========================================================================
 #  PUBLIC COMMAND
 # ===========================================================================
+function script:Invoke-NautilusTui {
+    # Resolve Run-TUI inside this module. If a botched in-process reload wiped
+    # private commands, re-import from disk once (new session is still preferred).
+    $cmd = Get-Command -Name Run-TUI -ErrorAction SilentlyContinue
+    if (-not $cmd) {
+        $manifest = Join-Path $script:ModuleRoot "Nautilus.psd1"
+        if (-not (Test-Path -LiteralPath $manifest)) {
+            $manifest = Join-Path (Join-Path $HOME ".nautilus") "Nautilus\Nautilus.psd1"
+        }
+        if (Test-Path -LiteralPath $manifest) {
+            try {
+                Import-Module -Name $manifest -Force -ErrorAction Stop
+            } catch {
+                Write-Host "Nautilus failed to reload: $($_.Exception.Message)"
+                Write-Host "Reinstall: iex (irm https://alex-ckshen.github.io/nautilus/install.ps1)"
+                return
+            }
+            $cmd = Get-Command -Name Run-TUI -ErrorAction SilentlyContinue
+        }
+    }
+    if (-not $cmd) {
+        Write-Host "Nautilus TUI core (Run-TUI) is missing from the loaded module."
+        Write-Host "Close this window, open a new PowerShell, and run: nautilus"
+        Write-Host "Or reinstall: iex (irm https://alex-ckshen.github.io/nautilus/install.ps1)"
+        return
+    }
+    & $cmd
+}
+
+
 function nautilus {
     [CmdletBinding()]
     param(
@@ -3167,9 +3225,9 @@ function nautilus {
     $rest = if ($Rest -and $Rest.Count -gt 1) { $Rest[1..($Rest.Count-1)] } else { @() }
 
     switch ($cmd) {
-        ""          { Run-TUI }
-        "chat"      { Run-TUI }
-        "tui"       { Run-TUI }
+        ""          { Invoke-NautilusTui }
+        "chat"      { Invoke-NautilusTui }
+        "tui"       { Invoke-NautilusTui }
         "ask"       {
             $msg = ($rest -join " ")
             if ([string]::IsNullOrWhiteSpace($msg)) {

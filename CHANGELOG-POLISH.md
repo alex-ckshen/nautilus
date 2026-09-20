@@ -1,3 +1,9 @@
+# 0.4.1.3
+
+- **Fix self-update breaking `nautilus` / `naut`** on Windows PowerShell 5.1: `Run-Update` no longer `Import-Module -Force`s itself in-process (that left exported `nautilus` alive while private `Run-TUI` vanished → `CommandNotFoundException: Run-TUI`).
+- Update downloads to a temp dir, **parses** `Nautilus.psm1` and checks for `Run-TUI` before replacing install files; then asks you to **open a new PowerShell** window.
+- `nautilus` entry soft-heals: if `Run-TUI` is missing, one reload attempt + clear recovery message.
+
 # 0.4.1.2
 
 Versioning note: 0.4.1.x is the UI-polish train (0.4.0.3 → .1, 0.4.0.4 → .2 conceptually). Further feature work stays on later 0.4.1.__ / 0.4.2.__ as needed.
