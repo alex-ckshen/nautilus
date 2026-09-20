@@ -3,14 +3,16 @@
 Source: xai-org/grok-build docs (`user-guide/03-keyboard-shortcuts.md`, `04-slash-commands.md`) + pager actions/slash registry.
 Nautilus stays pure PowerShell; we port *behaviour*, not Rust crates.
 
-## Already in Nautilus (through 0.4.0.2)
+## Already in Nautilus (through 0.4.0.3)
 
 | Area | Status |
 |------|--------|
 | `/` slash menu with type-to-filter dropdown | 0.3.47 |
 | Grouped `/` categories (Session / Clipboard / Theme & UI / Help) | 0.4.0.2 |
-| No bottom model·theme·connection status footer; 2-line prompt | 0.4.0.2 |
-| Rounded prompt chrome (2-line), update tip on hint strip + Ctrl+U | yes |
+| No bottom model/theme/connection status footer | 0.4.0.2 |
+| Complete 3-line ASCII prompt frame; Big5-safe separators | 0.4.0.3 |
+| Larger centered `/` slash modal (full borders) | 0.4.0.3 |
+| Prompt chrome + update tip on hint strip + Ctrl+U | yes |
 | `?` / Ctrl+. shortcuts overlay | yes |
 | Double-Esc quit + toasts | yes |
 | Mouse wheel + menu click (best-effort) | yes |

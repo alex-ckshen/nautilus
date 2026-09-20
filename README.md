@@ -51,8 +51,8 @@ nautilus help            # full command list
 ### Inside the TUI
 
 - Type a message and press **Enter** to chat with Nautilus (streaming responses).
-- Compact **rounded prompt box** (Grok-style) with model/theme caption and a contextual shortcut hint strip.
-- Type **`/`** for slash-command autocomplete (dropdown above the prompt). Commands: `/help`, `/new`, `/clear`, `/copy`, `/export`, `/config`, `/theme`, `/model`, `/search on|off`, `/improve`, `/update`, `/exit`.
+- Complete **ASCII prompt box** (top / `>` / bottom) with a contextual shortcut hint strip above it.
+- Type **`/`** for slash-command autocomplete (large centered modal). Commands: `/help`, `/new`, `/clear`, `/copy`, `/export`, `/config`, `/theme`, `/model`, `/search on|off`, `/improve`, `/update`, `/exit`.
 - **Ctrl+K** opens the command palette; **Ctrl+U** applies a pending update tip.
 - **Esc** cancels an in-flight request; press **Esc again within ~2s** to quit (toast confirms).
 - **?** (empty prompt) or **Ctrl+.** opens the shortcuts cheatsheet modal.
@@ -61,6 +61,7 @@ nautilus help            # full command list
 - Menu pickers (`/theme`, `/model`) support arrows, Enter, Esc, and best-effort **click**.
 - Smoother TUI paint in **0.4.0.1** (batched ANSI, no per-frame full clear, idle chrome-only refresh).
 - **0.4.0.2**: removed bottom model/theme/connection status footer; 2-line prompt; grouped `/` slash popup by category.
+- **0.4.0.3**: restored closed 3-line prompt frame; ASCII-safe chrome/separators for Big5 consoles; larger centered `/` modal.
 
 ## Themes
 
@@ -81,7 +82,7 @@ nautilus theme Cyber
 - Local config at `~/.nautilus/config.json`, history at `~/.nautilus/history.json`.
 - Virtual Terminal processing is enabled in-process on Windows PowerShell 5.1.
 - Thinking spinner (Grok-Build inspired polish); connection flavour lives in the title bar / startup only.
-- Rounded box chrome, grouped slash autocomplete, command palette, prompt history, multiline input, smoother frame paint, retuned dark palettes (0.4.0.1–0.4.0.2).
+- ASCII box chrome (Big5-safe), grouped centered slash modal, command palette, prompt history, multiline input, smoother frame paint, retuned dark palettes (0.4.0.1-0.4.0.3).
 
 ## Repository layout
 

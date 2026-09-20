@@ -1,13 +1,32 @@
+# 0.4.0.3
+
+## Prompt frame
+- Restored a **complete 3-line prompt box** (top + `>` mid + bottom borders) after 0.4.0.2 dropped `promptBot` with the status strip. No model/theme caption inside - just a closed blank with `>` .
+- Layout: hint strip above the box; chat ends one row earlier than 0.4.0.2 so all four sides fit.
+
+## ASCII-safe glyphs (zh-TW / Big5 PS 5.1)
+- Default chrome is now **ASCII** (`+ - |`) via `UseRoundedBorders = $false` (rounded U+25xx kept as optional fallback). Avoids `?` / clipped edges when box-drawing is double-width or unmapped.
+- Role separator `U+203A` (`›`) → `>` (fixes white `?` between Daddy/Nautilus and message).
+- Title connected glyph `U+25C9` (`◉`) → `*` .
+- Comment separators cleaned to ASCII (`-`, `/`); spinner already ASCII.
+
+## Slash `/` popup
+- Larger **centered modal** (not prompt-anchored): roughly middle of the terminal, wider so descriptions fit (or ellipsize cleanly), taller for category headers + more rows.
+- Complete four-side box; footer hint `up/down  tab fill  enter run  esc` stays inside with a proper bottom border.
+- Groups, type-to-filter, Up/Down/Tab/Enter/Esc, accent selection, mouse/wheel unchanged.
+
+Proxy / gist / Gemini wiring untouched. UTF-8 BOM on `.psm1`/`.psd1`; `install.ps1` unchanged.
+
 # 0.4.0.2
 
 ## Chrome
-- **Removed bottom status/footer strip** under the `>` prompt (`model · theme · connected to … ———`). Dropped caption painting in `Render-Frame` / `Render-ChromeOnly` and stopped idle `$script:StatusIdx` flavour rotation.
+- **Removed bottom status/footer strip** under the `>` prompt (`model · theme · connected to … ---`). Dropped caption painting in `Render-Frame` / `Render-ChromeOnly` and stopped idle `$script:StatusIdx` flavour rotation.
 - Prompt chrome is now a **compact 2-line** rounded box (top rule + `>` line), reclaiming one chat row.
 - Multiline tip and pending **Update:** tip surface on the existing hint strip only (no new bar).
 
 ## Slash `/` popup
 - Commands grouped by category for scanning: **Session**, **Clipboard & export**, **Theme & UI**, **Help**.
-- Category headers are muted; selected command row stays accent+bold; unselected muted. Filter + ↑↓/Tab/Enter/Esc unchanged.
+- Category headers are muted; selected command row stays accent+bold; unselected muted. Filter + Up/Down/Tab/Enter/Esc unchanged.
 - Added `/shortcuts` (opens the same cheatsheet as `?` / Ctrl+.). Ctrl+K palette labels include category.
 
 Proxy / gist / Gemini wiring untouched. UTF-8 BOM on `.psm1`/`.psd1`; `install.ps1` unchanged.
@@ -15,18 +34,18 @@ Proxy / gist / Gemini wiring untouched. UTF-8 BOM on `.psm1`/`.psd1`; `install.p
 # 0.4.0.1
 
 ## Smooth rendering
-- No full clear (`2J`) every frame — only on Enter-TUI and window resize.
+- No full clear (`2J`) every frame - only on Enter-TUI and window resize.
 - Each frame batched into one `StringBuilder` + single `[Console]::Out.Write`, wrapped in synchronized update `ESC[?2026h` … `ESC[?2026l`.
 - Idle status rotation (~1 Hz) uses `Render-ChromeOnly` (hint + prompt chrome) when chat/buffer unchanged; `$script:NeedsFullPaint` / resize dirty flags force full paint.
 - Cursor stays hidden for the whole TUI session.
 
 ## Wave 1
-- `/new` — clear history + notice (slash catalog + help).
-- `/copy` — last assistant reply via `Set-Clipboard` / `clip.exe`, else `~/.nautilus/last-copy.txt`.
-- `/export [path]` — markdown transcript under `~/.nautilus/exports/` (timestamp default).
-- Prompt history — last ~50 user sends; Up/Down when buffer empty or in history mode (slash menu still owns arrows).
-- Multiline — Alt+Enter / Ctrl+J insert newline; trailing `\` then Enter continues line; prompt shows `[...]` + multiline caption.
-- Ctrl+K command palette — Select-Menu over slash catalog (fill argful / run the rest). Ctrl+U update unchanged.
+- `/new` - clear history + notice (slash catalog + help).
+- `/copy` - last assistant reply via `Set-Clipboard` / `clip.exe`, else `~/.nautilus/last-copy.txt`.
+- `/export [path]` - markdown transcript under `~/.nautilus/exports/` (timestamp default).
+- Prompt history - last ~50 user sends; Up/Down when buffer empty or in history mode (slash menu still owns arrows).
+- Multiline - Alt+Enter / Ctrl+J insert newline; trailing `\` then Enter continues line; prompt shows `[...]` + multiline caption.
+- Ctrl+K command palette - Select-Menu over slash catalog (fill argful / run the rest). Ctrl+U update unchanged.
 
 ## Palette dial
 - Semantic roles: `text` / `muted` / `faint` / `accent` / `border` / `good` / `warn` / `error` / `user` / `assistant`.
@@ -55,30 +74,30 @@ Proxy / gist / Gemini wiring untouched. UTF-8 BOM on `.psm1`/`.psd1`; `install.p
 # 0.3.46.0
 
 - **Rounded chrome** (Grok Build prompt_widget): script `Box` glyphs `U+256D/256E/2570/256F` + `U+2500/2502`, `BoxAscii` fallback `+ - |`. `UseRoundedBorders` defaults **true**. `Select-Menu` uses rounded box; `Render-Frame` input is a compact **3-line rounded prompt** (top rule, middle `> ` line, bottom caption with model/theme or update tip).
-- **Contextual shortcut hints**: idle strip `enter send / commands ? keys esc quit`; streaming `esc cancel`. **Double-Esc quit** — first Esc arms toast `press esc again to quit` (~2s); second Esc quits. Small toast painted by `Render-Frame`.
+- **Contextual shortcut hints**: idle strip `enter send / commands ? keys esc quit`; streaming `esc cancel`. **Double-Esc quit** - first Esc arms toast `press esc again to quit` (~2s); second Esc quits. Small toast painted by `Render-Frame`.
 - **Shortcuts cheatsheet**: `?` (empty prompt) or **Ctrl+.** opens centered rounded modal of keybindings (aligned with `/help`); Esc / `?` / Ctrl+. closes.
-- **Mouse best-effort**: `Enter-TUI` enables VT mouse `?1000h` / `?1006h` (disabled on exit / Ctrl+C). SGR parse for wheel scroll (chat + menus) and menu row click. Chat click left as clear region stub — full hit-testing is fragile on PS 5.1 / some hosts; see note below.
+- **Mouse best-effort**: `Enter-TUI` enables VT mouse `?1000h` / `?1006h` (disabled on exit / Ctrl+C). SGR parse for wheel scroll (chat + menus) and menu row click. Chat click left as clear region stub - full hit-testing is fragile on PS 5.1 / some hosts; see note below.
 - Spinner remains ASCII `| / - \`. UTF-8 BOM preserved. Proxy / gist / Gemini endpoints unchanged.
 
 ### Mouse limits (PS 5.1)
 - Relies on terminal VT mouse reporting; conhost/Windows Terminal usually work, ISE does not.
-- `[Console]::ReadKey` + ESC-drain SGR parse is best-effort — rapid motion / drag not handled.
+- `[Console]::ReadKey` + ESC-drain SGR parse is best-effort - rapid motion / drag not handled.
 - No clipboard selection or click-to-focus in chat yet (stub only).
 
 # 0.3.45.0
 
-- **In-TUI update tip** (Grok Build–inspired): best-effort background check of remote `Nautilus.psd1` `ModuleVersion` vs local; when newer, show centered status tip `Update: vX available, press ctrl+u to restart` (“Update:” bold/accent).
-- **Ctrl+U** applies pending update (priority over any line-edit use): leave alt-screen → `Run-Update` → print “Updated to vX — run nautilus again”. Optional `/update` slash command uses the same path.
+- **In-TUI update tip** (Grok Build-inspired): best-effort background check of remote `Nautilus.psd1` `ModuleVersion` vs local; when newer, show centered status tip `Update: vX available, press ctrl+u to restart` (“Update:” bold/accent).
+- **Ctrl+U** applies pending update (priority over any line-edit use): leave alt-screen → `Run-Update` → print “Updated to vX - run nautilus again”. Optional `/update` slash command uses the same path.
 - **Select-Menu** polish: centered floating ASCII box (`+--+` / `|`), title row, `>` highlight, footer `up/down  enter  esc`; absolute-coord redraw; ASCII `...` only.
 - Cleaner input prompt (`> ` ASCII-safe). Spinner remains ASCII `| / - \`. UTF-8 BOM preserved for PS 5.1.
 
 # 0.3.44.1
 
-- **Critical:** ship PowerShell files as **UTF-8 with BOM** so Windows PowerShell 5.1 (e.g. zh-TW CP950) can parse the module. Without BOM, spinner glyphs corrupted and `Import-Module` failed — `nautilus` not found after install.
+- **Critical:** ship PowerShell files as **UTF-8 with BOM** so Windows PowerShell 5.1 (e.g. zh-TW CP950) can parse the module. Without BOM, spinner glyphs corrupted and `Import-Module` failed - `nautilus` not found after install.
 - Replace braille spinner with ASCII `| / - \`.
 - Installer: do not call `nautilus` unless import succeeded; print real import errors.
 
-# Nautilus 0.3.44.0 — polish changelog
+# Nautilus 0.3.44.0 - polish changelog
 
 Built on 0.3.43.1. Proxy, gist key URL, and Gemini endpoint wiring are unchanged.
 
@@ -91,7 +110,7 @@ Built on 0.3.43.1. Proxy, gist key URL, and Gemini endpoint wiring are unchanged
 - **`Set-Alias naut`**: wrapped in try/catch (Global → Local fallback) so module import still succeeds
 - **Import-time dirs**: create `~/.nautilus` safely (no throw during import)
 - **`Enter-TUI` / main-loop `ReadKey`**: try/catch so missing console fails with a clear exit instead of a raw exception
-- **Installer**: fixed invalid regex `'[/\]'` (could throw *Invalid pattern*) — path detection now uses `IndexOf`; PS 5.1-safe Windows check (no bare `$IsWindows`)
+- **Installer**: fixed invalid regex `'[/\]'` (could throw *Invalid pattern*) - path detection now uses `IndexOf`; PS 5.1-safe Windows check (no bare `$IsWindows`)
 
 ## Update hardening (`nautilus update`)
 - Nested 2-arg `Join-Path` (PS 5.1)
@@ -120,7 +139,7 @@ In-TUI: `/help`, `/clear`, `/config`, `/theme`, `/model`, `/search`, `/improve`,
 - Direct Gemini API endpoint
 
 ## Windows retest checklist
-- Import in Windows PowerShell 5.1 and pwsh 7+ (twice in same process — Add-Type re-import)
+- Import in Windows PowerShell 5.1 and pwsh 7+ (twice in same process - Add-Type re-import)
 - Launch in Windows Terminal + conhost; confirm ISE prints host warning instead of crashing
 - `/theme` and `/model` dropdowns: arrows, Enter, Esc, small window
 - `nautilus update` against live Pages; version banner shows 0.3.44.0

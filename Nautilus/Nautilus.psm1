@@ -2,10 +2,10 @@
     Nautilus - a pure-PowerShell futuristic TUI AI assistant.
     JARVIS-style personality, Gemini-powered, blue sci-fi aesthetic.
     Public command: nautilus  (alias: naut)
-    Version: 0.4.0.2
+    Version: 0.4.0.3
 #>
 
-$script:NautilusVersion = "0.4.0.2"
+$script:NautilusVersion = "0.4.0.3"
 $script:TuiActive = $false
 $script:TuiForceExit = $false
 $script:CancelHandlerRegistered = $false
@@ -13,7 +13,7 @@ $script:LastMaxStart = 0
 $script:StatusIdx = 0
 $script:PendingUpdateVersion = $null
 $script:_UpdateCheckState = $null
-$script:UseRoundedBorders = $true
+$script:UseRoundedBorders = $false
 $script:ToastText = $null
 $script:ToastUntil = $null
 $script:EscArmUntil = $null
@@ -212,7 +212,7 @@ function script:Dim  {
 }
 
 # ===========================================================================
-#  BOX CHROME  (Grok Build–style rounded borders + ASCII fallback)
+#  BOX CHROME  (Grok Build-style rounded borders + ASCII fallback)
 # ===========================================================================
 # Rounded: U+256D/256E/2570/256F corners, U+2500/2502 lines (╭─╮│╰─╯)
 $script:Box = @{
@@ -364,7 +364,6 @@ function script:Draw-SlashDropdown {
         $display.Add(@{ Kind = 'item'; Index = $i; Item = $it })
     }
 
-    $maxVisible = 10
     $footerHint = "up/down  tab fill  enter run  esc"
 
     $labelCol = 0
@@ -372,15 +371,29 @@ function script:Draw-SlashDropdown {
         $lw = ("/" + $it.Name).Length
         if ($lw -gt $labelCol) { $labelCol = $lw }
     }
-    $labelCol = [Math]::Min([Math]::Max($labelCol, 6), 16)
+    $labelCol = [Math]::Min([Math]::Max($labelCol, 8), 16)
 
-    $contentW = $labelCol + 2 + 24
+    $maxDesc = 0
+    foreach ($it in $items) {
+        $dl = ([string]$it.Desc).Length
+        if ($dl -gt $maxDesc) { $maxDesc = $dl }
+    }
+    $contentW = $labelCol + 4 + $maxDesc
     foreach ($catName in @(Get-SlashCategoryOrder)) {
         if ($catName.Length + 1 -gt $contentW) { $contentW = $catName.Length + 1 }
     }
     if ($footerHint.Length + 1 -gt $contentW) { $contentW = $footerHint.Length + 1 }
-    $innerW = [Math]::Max(30, [Math]::Min($contentW + 2, $WinW - 6))
+
+    # Large centered modal: wider so descriptions fit; taller for groups + rows
+    $innerW = [Math]::Max(48, [Math]::Min($contentW + 2, $WinW - 8))
+    if ($innerW -gt ($WinW - 6)) { $innerW = [Math]::Max(36, $WinW - 6) }
     $boxW = $innerW + 2
+
+    # Prefer showing all filtered rows when the window allows
+    $chromeRows = 3   # top border + footer hint + bottom border
+    $maxVisible = [Math]::Max(8, $WinH - 10)
+    if ($maxVisible -gt $display.Count) { $maxVisible = $display.Count }
+    if ($maxVisible -lt 1) { $maxVisible = 1 }
 
     # Scroll so the selected command row stays in view (headers count toward height)
     $selDisp = 0
@@ -405,12 +418,16 @@ function script:Draw-SlashDropdown {
     $viewEnd = [Math]::Min($display.Count, $viewTop + $maxVisible)
     $visCount = $viewEnd - $viewTop
 
-    # rows: top, visible display, footer, bottom
-    $boxHeight = $visCount + 3
-    $startRow = $PromptTop - $boxHeight
-    if ($startRow -lt 3) { $startRow = 3 }
+    # rows: top, visible display, footer, bottom - center on screen (modal), not prompt-anchored
+    $boxHeight = $visCount + $chromeRows
+    $startRow = [Math]::Max(2, [int](($WinH - $boxHeight) / 2) + 1)
+    if (($startRow + $boxHeight - 1) -gt $WinH) {
+        $startRow = [Math]::Max(1, $WinH - $boxHeight + 1)
+    }
     $startCol = [Math]::Max(1, [int](($WinW - $boxW) / 2) + 1)
-    if ($startCol + $boxW - 1 -gt $WinW) { $startCol = [Math]::Max(1, $WinW - $boxW) }
+    if (($startCol + $boxW - 1) -gt $WinW) {
+        $startCol = [Math]::Max(1, $WinW - $boxW + 1)
+    }
 
     $hLine = $box.H * $innerW
     $row = $startRow
@@ -464,6 +481,7 @@ function script:Draw-SlashDropdown {
     if ($footShown.Length -gt ($innerW - 1)) {
         $footShown = $footShown.Substring(0, [Math]::Max(1, $innerW - 4)) + "..."
         $footPad = $innerW - 1 - $footShown.Length
+        if ($footPad -lt 0) { $footPad = 0 }
     }
     Write-At $row $startCol ((Themed $box.V 'border') + (Dim (" " + $footShown)) + (" " * $footPad) + (Themed $box.V 'border'))
     $row++
@@ -749,7 +767,7 @@ function script:Get-NautilusApiKey {
     $cfg = Load-Config
     if ($cfg.apiKey) { return $cfg.apiKey }
 
-    # Proxy mode – Cloudflare Worker holds the real key
+    # Proxy mode - Cloudflare Worker holds the real key
     if ($cfg.proxyUrl -and $cfg.proxyUrl.Trim()) {
         return ""
     }
@@ -1052,7 +1070,7 @@ $script:StatusLines = @(
 function script:Enable-VT {
     # PowerShell 7 enables VT by default; for Windows PowerShell 5.1 we must
     # flip ENABLE_VIRTUAL_TERMINAL_PROCESSING on the current console handle.
-    # Never throw — module import and TUI degrade gracefully without VT.
+    # Never throw - module import and TUI degrade gracefully without VT.
     if ($PSVersionTable.PSVersion.Major -lt 6) {
         try {
             $sig = @'
@@ -1280,7 +1298,7 @@ function script:Stop-UpdateCheck {
 }
 
 function script:Invoke-PendingUpdateApply {
-    # Leave TUI first (caller should Exit-TUI). Download then ask user to relaunch —
+    # Leave TUI first (caller should Exit-TUI). Download then ask user to relaunch -
     # in-process module reload mid-session is fragile on PS 5.1.
     $esc = $script:Esc
     $target = $script:PendingUpdateVersion
@@ -1352,7 +1370,7 @@ function script:Try-ParseSgrMouse {
         } catch { break }
         [void]$buf.Append($k.KeyChar)
         $s = $buf.ToString()
-        # SGR: <b;x;yM or <b;x;ym   (CSI already consumed as ESC — next is '[')
+        # SGR: <b;x;yM or <b;x;ym   (CSI already consumed as ESC - next is '[')
         if ($s -match '^\[<(\d+);(\d+);(\d+)([Mm])') {
             $btn = [int]$Matches[1]
             $col = [int]$Matches[2]
@@ -1406,7 +1424,7 @@ function script:Read-TuiEvent {
                         if ($mouse.Kind -eq 'MouseClick' -and $mouse.Pressed) {
                             return @{ Kind = 'MouseClick'; Col = $mouse.Col; Row = $mouse.Row; Button = $mouse.Button; Key = $null }
                         }
-                        # release / other — ignore
+                        # release / other - ignore
                         continue
                     }
                 }
@@ -1525,7 +1543,7 @@ function script:Show-ShortcutsHelp {
             if ($ev.Kind -eq 'Key') {
                 $key = $ev.Key
                 $isCtrlDot = (($key.Key -eq 'OemPeriod') -or ($key.KeyChar -eq '.')) -and (($key.Modifiers -band [ConsoleModifiers]::Control) -ne 0)
-                # Some hosts report Ctrl+. as KeyChar = [char]0 with Control+OemPeriod; also accept Ctrl+X as Grok alt — Nautilus uses Ctrl+. only
+                # Some hosts report Ctrl+. as KeyChar = [char]0 with Control+OemPeriod; also accept Ctrl+X as Grok alt - Nautilus uses Ctrl+. only
                 if ($key.Key -eq 'Escape' -or $key.KeyChar -eq '?' -or $isCtrlDot) { break }
                 if (($key.Key -eq 'Oem2' -or $key.KeyChar -eq '/') -and (($key.Modifiers -band [ConsoleModifiers]::Control) -ne 0)) { break }
             } elseif ($ev.Kind -eq 'MouseClick') {
@@ -1823,10 +1841,11 @@ function script:Render-ChromeOnly {
     $h = [Console]::WindowHeight
     if ($w -lt 30 -or $h -lt 12) { return $false }
 
-    # 2-line prompt (no bottom status/footer strip) — reclaim a chat row
-    $hintRow   = $h - 2
-    $promptTop = $h - 1
-    $promptMid = $h
+    # 3-line prompt frame (top + mid + bottom); no status caption inside
+    $hintRow   = $h - 3
+    $promptTop = $h - 2
+    $promptMid = $h - 1
+    $promptBot = $h
     $innerW = [Math]::Max(8, $w - 2)
     $streaming = ($streamState -and -not $streamState.Done)
 
@@ -1834,7 +1853,7 @@ function script:Render-ChromeOnly {
     $isMulti = ($buf.IndexOf([char]10) -ge 0)
 
     Begin-Frame
-    # hint strip: toast / notice / stream / multiline / update (no model·theme·flavour bar)
+    # hint strip: toast / notice / stream / multiline / update (no model/theme/flavour bar)
     $hintCol = 1
     if ($script:ToastText) {
         $plain = [string]$script:ToastText
@@ -1873,6 +1892,7 @@ function script:Render-ChromeOnly {
     if ($midPad -lt 0) { $midPad = 0 }
     $midLine = (Themed $box.V 'border') + $prompt + (Themed $buf 'text') + (" " * $midPad) + (Themed $box.V 'border')
     Write-At $promptMid 1 $midLine -ClearEol
+    Write-At $promptBot 1 ((Themed ($box.BL + $hLine + $box.BR) 'border')) -ClearEol
     End-Frame
     return $true
 }
@@ -1908,7 +1928,7 @@ function script:Render-Frame {
     Begin-Frame -FullClear:$doClear
 
     $titleBar = "  N A U T I L U S  v$($script:NautilusVersion)  "
-    $conn = "  $([char]0x25C9) connected  asia-01  "
+    $conn = "  * connected  asia-01  "
     $modelName = if ($script:Config -and $script:Config.model) { $script:Config.model } else { $script:DefaultModel }
     $modelTag = "model: $modelName  "
     $padConn = $w - $titleBar.Length - $conn.Length - $modelTag.Length
@@ -1916,12 +1936,13 @@ function script:Render-Frame {
     $topLine = (Themed $titleBar 'bright') + (Themed (" " * $padConn) 'titlebar') + (Themed $conn 'muted') + (Themed $modelTag 'faint')
     $borderTop = (Themed ($box.H * [Math]::Max(1, $w)) 'border')
 
-    # Layout: title, top rule, chat, hint/toast, 2-line rounded prompt (no status footer)
-    $hintRow   = $h - 2
-    $promptTop = $h - 1
-    $promptMid = $h
+    # Layout: title, top rule, chat, hint/toast, 3-line prompt frame (no status caption)
+    $hintRow   = $h - 3
+    $promptTop = $h - 2
+    $promptMid = $h - 1
+    $promptBot = $h
     $chatTop = 3
-    $chatBottom = $h - 3
+    $chatBottom = $h - 4
     if ($chatBottom -lt $chatTop) { $chatBottom = $chatTop }
     $chatHeight = $chatBottom - $chatTop + 1
     $chatWidth = $w - 2
@@ -1943,7 +1964,7 @@ function script:Render-Frame {
             'assistant' { 'text' }
             default     { 'system' }
         }
-        $prefix = (Bold "$label " $roleCode) + (Themed ([string]([char]0x203A) + " ") 'muted')
+        $prefix = (Bold "$label " $roleCode) + (Themed "> " 'muted')
         $prefixLen = [Math]::Max(2, (VisibleLen $prefix))
         $content = if ($null -eq $m.content) { "" } else { [string]$m.content }
         $wrapped = Wrap-Text -text $content -width ($chatWidth - $prefixLen)
@@ -1961,7 +1982,7 @@ function script:Render-Frame {
 
     if ($streamState -and -not $streamState.Done) {
         $label = "Nautilus"
-        $prefix = (Bold "$label " $th.accent) + (Themed ([string]([char]0x203A) + " ") 'muted')
+        $prefix = (Bold "$label " $th.accent) + (Themed "> " 'muted')
         $prefixLen = [Math]::Max(2, (VisibleLen $prefix))
         $partial = Get-StreamFullText $streamState
         if ([string]::IsNullOrEmpty($partial)) {
@@ -1983,7 +2004,7 @@ function script:Render-Frame {
             $lines.Add(@{ text = (" " * $prefixLen) + (Themed "$sp" 'faint'); role = "assistant" })
         }
     } elseif ($streamState -and $streamState.Done -and -not [string]::IsNullOrEmpty($streamState.Error) -and [string]::IsNullOrEmpty($streamState.Full.ToString())) {
-        $lines.Add(@{ text = (Bold "Nautilus " $th.accent) + (Themed ([string]([char]0x203A) + " ") 'muted') + (Themed (Format-ApiError $streamState.Error) 'error'); role = "assistant" })
+        $lines.Add(@{ text = (Bold "Nautilus " $th.accent) + (Themed "> " 'muted') + (Themed (Format-ApiError $streamState.Error) 'error'); role = "assistant" })
     }
 
     if ((@($messages).Count -eq 0) -and -not $streamState) {
@@ -2030,7 +2051,7 @@ function script:Render-Frame {
         $r++
     }
 
-    # ---- hint strip / toast / notice / multiline / update (no model·theme·flavour footer) ----
+    # ---- hint strip / toast / notice / multiline / update (no model/theme/flavour footer) ----
     $streaming = ($streamState -and -not $streamState.Done)
     $bufEarly = if ($null -eq $inputBuffer) { "" } else { $inputBuffer }
     $isMulti = ($bufEarly.IndexOf([char]10) -ge 0)
@@ -2057,7 +2078,7 @@ function script:Render-Frame {
     Write-At $hintRow 1 "" -ClearEol
     Write-At $hintRow $hintCol $hintText
 
-    # ---- compact 2-line rounded prompt (top rule + > line; status footer removed) ----
+    # ---- complete 3-line prompt frame (top + > mid + bottom; no status caption) ----
     $innerW = [Math]::Max(8, $w - 2)
     $hLine = $box.H * $innerW
     Write-At $promptTop 1 ((Themed ($box.TL + $hLine + $box.TR) 'border')) -ClearEol
@@ -2076,8 +2097,9 @@ function script:Render-Frame {
     if ($midPad -lt 0) { $midPad = 0 }
     $midLine = (Themed $box.V 'border') + $prompt + (Themed $displayBuf 'text') + (" " * $midPad) + (Themed $box.V 'border')
     Write-At $promptMid 1 $midLine -ClearEol
+    Write-At $promptBot 1 ((Themed ($box.BL + $hLine + $box.BR) 'border')) -ClearEol
 
-    # Slash autocomplete dropdown floats just above the prompt
+    # Slash autocomplete: large centered modal panel
     if (-not $script:SlashMenuDismissed) {
         $slashMatches = @(Get-SlashMatches -Buffer $inputBuffer)
         if ($slashMatches.Count -gt 0) {
@@ -2323,7 +2345,7 @@ function script:Run-TUI {
                         $inputBuffer = Get-SlashFill -Item $picked
                         $key = New-Object System.ConsoleKeyInfo ([char]13, [ConsoleKey]::Enter, $false, $false, $false)
                         $ev = @{ Kind = 'Key'; Key = $key }
-                        # fall through by reassigning — handled below via goto-style: set and jump into Enter
+                        # fall through by reassigning - handled below via goto-style: set and jump into Enter
                         # Force Enter handling by recursive-style: put buffer and continue into Enter branch
                     }
                 } else {
