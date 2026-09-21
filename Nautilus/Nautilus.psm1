@@ -2,10 +2,10 @@
     Nautilus - a pure-PowerShell futuristic TUI AI assistant.
     JARVIS-style personality, Gemini-powered, blue sci-fi aesthetic.
     Public command: nautilus  (alias: naut)
-    Version: 0.4.2.6
+    Version: 0.4.3.1
 #>
 
-$script:NautilusVersion = "0.4.2.6"
+$script:NautilusVersion = "0.4.3.1"
 $script:TuiActive = $false
 $script:TuiForceExit = $false
 $script:CancelHandlerRegistered = $false
@@ -101,7 +101,7 @@ You exist to make Daddy's life smoother, sharper, and more enjoyable.
 TUI / copyable code (important):
 - You run inside a pure-PowerShell terminal UI that parses markdown fenced code blocks.
 - When you share copyable code, put it in a fenced block with a language tag (e.g. ```powershell ... ```).
-- Prefer one clear fence per snippet so Daddy can copy it with F6, Ctrl+Alt+C, or /copycode (/cc).
+- Prefer one clear fence per snippet so Daddy can copy it with F6, Ctrl+Alt+C, or /copycode (/cc). When several fences appear, Daddy can pick among them via the /cc menu.
 - Keep prose outside fences. Do not wrap an entire reply in a single fence.
 "@
 
@@ -144,6 +144,7 @@ $script:Themes = [ordered]@{
         assistant= 252   # body (not accent)
         system   = 246
         dim      = 244
+        code     = 111   # fenced code body
         border   = 239   # soft gray border
         good     = 114
         warn     = 178
@@ -161,6 +162,7 @@ $script:Themes = [ordered]@{
         assistant= 251
         system   = 245
         dim      = 244
+        code     = 110
         border   = 238
         good     = 78
         warn     = 178
@@ -178,6 +180,7 @@ $script:Themes = [ordered]@{
         assistant= 252
         system   = 246
         dim      = 244
+        code     = 87
         border   = 240
         good     = 84
         warn     = 221
@@ -195,6 +198,7 @@ $script:Themes = [ordered]@{
         assistant= 251
         system   = 245
         dim      = 244
+        code     = 110
         border   = 238
         good     = 115
         warn     = 180
@@ -977,6 +981,7 @@ function script:Themed {
         'assistant' { $th.assistant }
         'system'    { $th.system }
         'dim'       { $th.dim }
+        'code'      { if (Test-DictHasKey $th 'code') { $th.code } else { $th.deep } }
         'border'    { $th.border }
         'good'      { $th.good }
         'warn'      { $th.warn }
@@ -1020,6 +1025,231 @@ function script:Wrap-Text {
     }
     return ,$out
 }
+
+
+function script:Format-InlineMarkdown {
+    # Light inline markdown for chat prose: `code`, **bold**. Returns ANSI string.
+    param([string]$Text, [string]$BaseRole = 'text')
+    if ([string]::IsNullOrEmpty($Text)) { return "" }
+    $th = $script:CurrentTheme
+    if (-not $th) { $th = $script:Themes["Nautilus"] }
+    $baseCode = 252
+    $boldCode = 255
+    $codeCode = 111
+    try {
+        if (Test-DictHasKey $th $BaseRole) { $baseCode = [int]$th.$BaseRole }
+        elseif (Test-DictHasKey $th 'text') { $baseCode = [int]$th.text }
+        if (Test-DictHasKey $th 'bright') { $boldCode = [int]$th.bright }
+        if (Test-DictHasKey $th 'code') { $codeCode = [int]$th.code }
+        elseif (Test-DictHasKey $th 'deep') { $codeCode = [int]$th.deep }
+    } catch { }
+    $esc = $script:Esc
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.Append("$esc[38;5;${baseCode}m")
+    $i = 0
+    $n = $Text.Length
+    while ($i -lt $n) {
+        # inline code `...`
+        if ($Text[$i] -eq [char]96) {
+            $j = $i + 1
+            while ($j -lt $n -and $Text[$j] -ne [char]96) { $j++ }
+            if ($j -lt $n) {
+                $inner = $Text.Substring($i + 1, $j - $i - 1)
+                [void]$sb.Append("$esc[38;5;${codeCode}m$inner$esc[38;5;${baseCode}m")
+                $i = $j + 1
+                continue
+            }
+        }
+        # **bold**
+        if ($i + 1 -lt $n -and $Text[$i] -eq [char]42 -and $Text[$i + 1] -eq [char]42) {
+            $j = $i + 2
+            while ($j + 1 -lt $n -and -not ($Text[$j] -eq [char]42 -and $Text[$j + 1] -eq [char]42)) { $j++ }
+            if ($j + 1 -lt $n) {
+                $inner = $Text.Substring($i + 2, $j - $i - 2)
+                [void]$sb.Append("$esc[1m$esc[38;5;${boldCode}m$inner$esc[0m$esc[38;5;${baseCode}m")
+                $i = $j + 2
+                continue
+            }
+        }
+        [void]$sb.Append($Text[$i])
+        $i++
+    }
+    [void]$sb.Append("$esc[0m")
+    return $sb.ToString()
+}
+
+function script:Get-MessageSegments {
+    # Split message into prose / code segments for rich chat paint.
+    # Open (unclosed) fence at end is treated as code with Open=$true (streaming-friendly).
+    param($Text)
+    $segs = New-Object System.Collections.Generic.List[object]
+    if ($null -eq $Text) { return @() }
+    if ($Text -is [System.Array]) {
+        $Text = [string]::Join("`n", @($Text | ForEach-Object { [string]$_ }))
+    } else {
+        $Text = [string]$Text
+    }
+    if ([string]::IsNullOrEmpty($Text)) {
+        [void]$segs.Add(@{ Kind = 'prose'; Text = "" })
+        return @($segs.ToArray())
+    }
+    $nl = [char]10
+    $norm = $Text -replace "`r`n", "`n" -replace "`r", "`n"
+    $lines = $norm.Split(@($nl), [System.StringSplitOptions]::None)
+    $i = 0
+    $prose = New-Object System.Collections.Generic.List[string]
+    while ($i -lt $lines.Length) {
+        $rawLine = [string]$lines[$i]
+        $trim = $rawLine.TrimStart()
+        $fenceChar = [char]0
+        $fenceLen = 0
+        if ($trim.Length -ge 3) {
+            $c0 = $trim[0]
+            if ($c0 -eq [char]96 -or $c0 -eq [char]126) {
+                $j = 0
+                while ($j -lt $trim.Length -and $trim[$j] -eq $c0) { $j++ }
+                if ($j -ge 3) { $fenceChar = $c0; $fenceLen = $j }
+            }
+        }
+        if ($fenceLen -ge 3) {
+            if ($prose.Count -gt 0) {
+                [void]$segs.Add(@{ Kind = 'prose'; Text = [string]::Join("`n", $prose.ToArray()) })
+                $prose.Clear()
+            }
+            $info = ""
+            if ($trim.Length -gt $fenceLen) { $info = $trim.Substring($fenceLen).Trim() }
+            $lang = ""
+            if (-not [string]::IsNullOrWhiteSpace($info)) {
+                $lang = [string](($info -split '\s+', 2)[0])
+            }
+            $codeParts = New-Object System.Collections.Generic.List[string]
+            $i++
+            $closed = $false
+            while ($i -lt $lines.Length) {
+                $cline = [string]$lines[$i]
+                $ctrim = $cline.TrimStart()
+                $isClose = $false
+                if ($ctrim.Length -ge $fenceLen -and $ctrim.Length -gt 0 -and $ctrim[0] -eq $fenceChar) {
+                    $k = 0
+                    while ($k -lt $ctrim.Length -and $ctrim[$k] -eq $fenceChar) { $k++ }
+                    if ($k -ge $fenceLen) {
+                        $after = ""
+                        if ($ctrim.Length -gt $k) { $after = $ctrim.Substring($k) }
+                        if ([string]::IsNullOrWhiteSpace($after)) { $isClose = $true }
+                    }
+                }
+                if ($isClose) { $closed = $true; break }
+                [void]$codeParts.Add($cline)
+                $i++
+            }
+            [void]$segs.Add(@{
+                Kind = 'code'
+                Lang = $lang
+                Text = [string]::Join("`n", $codeParts.ToArray())
+                Open = (-not $closed)
+            })
+            if ($closed) { $i++ }
+            continue
+        }
+        [void]$prose.Add($rawLine)
+        $i++
+    }
+    if ($prose.Count -gt 0) {
+        [void]$segs.Add(@{ Kind = 'prose'; Text = [string]::Join("`n", $prose.ToArray()) })
+    }
+    if ($segs.Count -eq 0) {
+        [void]$segs.Add(@{ Kind = 'prose'; Text = "" })
+    }
+    return @($segs.ToArray())
+}
+
+function script:Add-RichContentLines {
+    # Append painted chat lines for one message body into $Lines list.
+    param(
+        $Lines,
+        [string]$Content,
+        [int]$Width,
+        [int]$PrefixLen,
+        [string]$FirstPrefix,
+        [string]$BodyRole = 'text',
+        [string]$Role = 'assistant',
+        [bool]$ShowCopyHint = $false
+    )
+    if ($Width -lt 8) { $Width = 8 }
+    $pad = " " * [Math]::Max(0, $PrefixLen)
+    $segs = @(Get-MessageSegments -Text $Content)
+    $firstLine = $true
+    $hadCode = $false
+    $hadOpen = $false
+    foreach ($seg in $segs) {
+        if ($seg.Kind -eq 'code') {
+            $hadCode = $true
+            if ($seg.Open) { $hadOpen = $true }
+            $box = Get-Box
+            $lang = [string]$seg.Lang
+            if ([string]::IsNullOrWhiteSpace($lang)) { $lang = "code" }
+            $openMark = ""
+            if ($seg.Open) { $openMark = " ..." }
+            $label = " $lang$openMark "
+            # Borderless-ish chrome: label row + soft rule, no full box (Grok-Build vibe)
+            $ruleW = [Math]::Max(4, $Width - 1)
+            $head = (Themed ($box.H + $label) 'accent') + (Themed ($box.H * [Math]::Max(1, $ruleW - $label.Length - 1)) 'border')
+            if ($firstLine) {
+                [void]$Lines.Add(@{ text = $FirstPrefix + $head; role = $Role })
+                $firstLine = $false
+            } else {
+                [void]$Lines.Add(@{ text = $pad + $head; role = $Role })
+            }
+            $codeText = [string]$seg.Text
+            if ($null -eq $codeText) { $codeText = "" }
+            $codeLines = $codeText -split "`n"
+            if ($codeLines.Count -eq 0) { $codeLines = @("") }
+            foreach ($cl in $codeLines) {
+                $chunk = [string]$cl
+                # hard-wrap long code lines (no word wrap — keep indentation feel)
+                if ($chunk.Length -eq 0) {
+                    [void]$Lines.Add(@{ text = $pad + (Themed " " 'code'); role = $Role })
+                    continue
+                }
+                while ($chunk.Length -gt $Width) {
+                    $piece = $chunk.Substring(0, $Width)
+                    $chunk = $chunk.Substring($Width)
+                    [void]$Lines.Add(@{ text = $pad + (Themed $piece 'code'); role = $Role })
+                }
+                [void]$Lines.Add(@{ text = $pad + (Themed $chunk 'code'); role = $Role })
+            }
+            $foot = (Themed ($box.H * [Math]::Min($ruleW, 12)) 'border')
+            [void]$Lines.Add(@{ text = $pad + $foot; role = $Role })
+        } else {
+            $prose = [string]$seg.Text
+            if ($null -eq $prose) { $prose = "" }
+            # Skip pure empty/whitespace prose between fences (avoid double gaps).
+            # Keep a blank only when it is the whole message (handled below via $firstLine).
+            if ([string]::IsNullOrWhiteSpace($prose) -and -not $firstLine) {
+                continue
+            }
+            $wrapped = Wrap-Text -text $prose -width $Width
+            foreach ($wl in $wrapped) {
+                $painted = Format-InlineMarkdown -Text ([string]$wl) -BaseRole $BodyRole
+                if ($firstLine) {
+                    [void]$Lines.Add(@{ text = $FirstPrefix + $painted; role = $Role })
+                    $firstLine = $false
+                } else {
+                    [void]$Lines.Add(@{ text = $pad + $painted; role = $Role })
+                }
+            }
+        }
+    }
+    if ($firstLine) {
+        # empty body
+        [void]$Lines.Add(@{ text = $FirstPrefix; role = $Role })
+    }
+    # Copy hint once per finished message with closed fences only (never while open/streaming).
+    if ($ShowCopyHint -and $hadCode -and -not $hadOpen) {
+        [void]$Lines.Add(@{ text = $pad + (Dim "F6 / Ctrl+Alt+C / /cc  copy code"); role = $Role })
+    }
+}
+
 
 function script:VisibleLen {
     param([string]$s)
@@ -2194,16 +2424,104 @@ function script:Get-CopyableCodeBlocks {
     param([array]$Messages, [int]$MaxAssistantScan = 8)
     $msgs = @($Messages)
     $scanned = 0
+    $all = New-Object System.Collections.Generic.List[object]
     for ($i = $msgs.Count - 1; $i -ge 0; $i--) {
         $m = $msgs[$i]
         if ($null -eq $m) { continue }
         if ([string]$m.role -ne 'assistant') { continue }
         $scanned++
         $fences = @(Get-CodeFences -Text ([string]$m.content))
-        if ($fences.Count -gt 0) { return $fences }
+        foreach ($f in $fences) { [void]$all.Add($f) }
         if ($scanned -ge $MaxAssistantScan) { break }
     }
-    return @()
+    $out = New-Object System.Collections.Generic.List[object]
+    $idx = 0
+    foreach ($b in $all) {
+        $idx++
+        [void]$out.Add(@{
+            Index   = $idx
+            Lang    = $b.Lang
+            Code    = $b.Code
+            Preview = $b.Preview
+        })
+    }
+    return @($out.ToArray())
+}
+
+function script:Get-PrettyLangTag {
+    param([string]$Lang)
+    if ([string]::IsNullOrWhiteSpace($Lang)) { return "" }
+    $t = $Lang.Trim()
+    $key = $t.ToLowerInvariant()
+    $map = @{
+        powershell = 'PowerShell'; pwsh = 'PowerShell'; ps1 = 'PowerShell'
+        javascript = 'JavaScript'; js = 'JavaScript'; typescript = 'TypeScript'; ts = 'TypeScript'
+        csharp = 'C#'; 'c#' = 'C#'; cpp = 'C++'; 'c++' = 'C++'
+        python = 'Python'; py = 'Python'; bash = 'Bash'; shell = 'Shell'; sh = 'Shell'
+        json = 'JSON'; yaml = 'YAML'; yml = 'YAML'; html = 'HTML'; css = 'CSS'; sql = 'SQL'
+    }
+    if ($map.ContainsKey($key)) { return [string]$map[$key] }
+    if ($t.Length -eq 1) { return $t.ToUpperInvariant() }
+    return $t.Substring(0, 1).ToUpperInvariant() + $t.Substring(1).ToLowerInvariant()
+}
+
+# Build a Select-Menu label for one code block (agent-chat style).
+# $LangOrdinal is the 1-based per-language counter (ignored when Lang is empty).
+# $UnlabeledSuffix is appended for unlabeled blocks when needed for uniqueness (e.g. " (2)").
+function script:Get-CodeBlockMenuLabel {
+    param(
+        $Block,
+        [int]$LangOrdinal = 1,
+        [string]$UnlabeledSuffix = ""
+    )
+    $lang = if ($null -ne $Block) { [string]$Block.Lang } else { "" }
+    if (-not [string]::IsNullOrWhiteSpace($lang)) {
+        $pretty = Get-PrettyLangTag -Lang $lang
+        return ("> {0} code {1}" -f $pretty, $LangOrdinal)
+    }
+    $preview = ""
+    if ($null -ne $Block) { $preview = [string]$Block.Preview }
+    if ([string]::IsNullOrWhiteSpace($preview)) { $preview = "(empty)" }
+    return ("> {0}{1}" -f $preview, $UnlabeledSuffix)
+}
+
+function script:Get-CodeBlockMenuLabels {
+    param([array]$Blocks)
+    $langCounts = @{}
+    $previewCounts = @{}
+    $labels = New-Object System.Collections.Generic.List[string]
+    foreach ($b in @($Blocks)) {
+        $lang = [string]$b.Lang
+        if (-not [string]::IsNullOrWhiteSpace($lang)) {
+            $key = $lang.ToLowerInvariant()
+            if (-not $langCounts.ContainsKey($key)) { $langCounts[$key] = 0 }
+            $langCounts[$key] = [int]$langCounts[$key] + 1
+            [void]$labels.Add((Get-CodeBlockMenuLabel -Block $b -LangOrdinal ([int]$langCounts[$key])))
+        } else {
+            $preview = [string]$b.Preview
+            if ([string]::IsNullOrWhiteSpace($preview)) { $preview = "(empty)" }
+            $pkey = $preview
+            if (-not $previewCounts.ContainsKey($pkey)) { $previewCounts[$pkey] = 0 }
+            $previewCounts[$pkey] = [int]$previewCounts[$pkey] + 1
+            $n = [int]$previewCounts[$pkey]
+            $suffix = if ($n -gt 1) { " ($n)" } else { "" }
+            [void]$labels.Add((Get-CodeBlockMenuLabel -Block $b -UnlabeledSuffix $suffix))
+        }
+    }
+    # Select-Menu drops duplicate option strings — force uniqueness.
+    $seen = @{}
+    for ($i = 0; $i -lt $labels.Count; $i++) {
+        $base = [string]$labels[$i]
+        $candidate = $base
+        $n = 2
+        while ($seen.ContainsKey($candidate)) {
+            $candidate = "{0} ({1})" -f $base, $n
+            $n++
+        }
+        $seen[$candidate] = $true
+        $labels[$i] = $candidate
+    }
+    return @($labels.ToArray())
 }
 
 function script:Copy-TextToClipboard {
@@ -2286,21 +2604,17 @@ function script:Copy-CodeBlock {
         if ($blocks.Count -eq 1) {
             $chosen = $blocks[0]
         } else {
-            $labels = New-Object System.Collections.Generic.List[string]
-            foreach ($b in $blocks) {
-                $langLabel = if (-not [string]::IsNullOrWhiteSpace([string]$b.Lang)) { [string]$b.Lang } else { "code" }
-                [void]$labels.Add(("{0}  {1}  {2}" -f $b.Index, $langLabel, $b.Preview))
-            }
+            $labels = @(Get-CodeBlockMenuLabels -Blocks $blocks)
             $picked = $null
             try {
-                $picked = Select-Menu -Title "Copy code block" -Options @($labels.ToArray()) -DefaultIndex 0
+                $picked = Select-Menu -Title "Copy code block" -Options $labels -DefaultIndex 0
             } catch {
                 $picked = $null
             }
             $script:NeedsFullClear = $true
             $script:NeedsFullPaint = $true
             if (-not $picked) { return @{ Ok = $false; Notice = "copy cancelled" } }
-            $pickIdx = [array]::IndexOf(@($labels.ToArray()), [string]$picked)
+            $pickIdx = [array]::IndexOf($labels, [string]$picked)
             if ($pickIdx -lt 0) { return @{ Ok = $false; Notice = "copy cancelled" } }
             $chosen = $blocks[$pickIdx]
         }
@@ -2722,7 +3036,7 @@ function script:Render-Frame {
     foreach ($m in $messages) {
         $label = switch ($m.role) {
             'user'      { "Daddy" }
-            'assistant'  { "Nautilus" }
+            'assistant' { "Nautilus" }
             default     { "System" }
         }
         $roleCode = switch ($m.role) {
@@ -2730,7 +3044,7 @@ function script:Render-Frame {
             'assistant' { $th.accent }
             default     { $th.system }
         }
-        $roleName = switch ($m.role) {
+        $bodyRole = switch ($m.role) {
             'user'      { 'user' }
             'assistant' { 'text' }
             default     { 'system' }
@@ -2738,17 +3052,12 @@ function script:Render-Frame {
         $prefix = (Bold "$label " $roleCode) + (Themed "> " 'muted')
         $prefixLen = [Math]::Max(2, (VisibleLen $prefix))
         $content = if ($null -eq $m.content) { "" } else { [string]$m.content }
-        $wrapped = Wrap-Text -text $content -width ($chatWidth - $prefixLen)
-        $first = $true
-        foreach ($wl in $wrapped) {
-            if ($first) {
-                $lines.Add(@{ text = $prefix + (Themed $wl $roleName); role = $m.role })
-                $first = $false
-            } else {
-                $lines.Add(@{ text = (" " * $prefixLen) + (Themed $wl $roleName); role = $m.role })
-            }
-        }
-        $lines.Add(@{ text = ""; role = "gap" })
+        # Finished messages only (streaming path below forces ShowCopyHint:$false).
+        $showHint = ($m.role -eq 'assistant')
+        Add-RichContentLines -Lines $lines -Content $content -Width ($chatWidth - $prefixLen) `
+            -PrefixLen $prefixLen -FirstPrefix $prefix -BodyRole $bodyRole -Role ([string]$m.role) `
+            -ShowCopyHint:$showHint
+        [void]$lines.Add(@{ text = ""; role = "gap" })
     }
 
     if ($streamState -and -not $streamState.Done) {
@@ -2759,23 +3068,16 @@ function script:Render-Frame {
         if ([string]::IsNullOrEmpty($partial)) {
             $sp = $script:Spinner[$spinIdx % $script:Spinner.Count]
             $msg = if ($thinkingMsg) { $thinkingMsg } else { "thinking..." }
-            $lines.Add(@{ text = $prefix + (Themed "$sp $msg" 'muted'); role = "assistant" })
+            [void]$lines.Add(@{ text = $prefix + (Themed "$sp $msg" 'muted'); role = "assistant" })
         } else {
-            $wrapped = Wrap-Text -text $partial -width ($chatWidth - $prefixLen)
-            $first = $true
-            foreach ($wl in $wrapped) {
-                if ($first) {
-                    $lines.Add(@{ text = $prefix + (Themed $wl 'text'); role = "assistant" })
-                    $first = $false
-                } else {
-                    $lines.Add(@{ text = (" " * $prefixLen) + (Themed $wl 'text'); role = "assistant" })
-                }
-            }
+            Add-RichContentLines -Lines $lines -Content $partial -Width ($chatWidth - $prefixLen) `
+                -PrefixLen $prefixLen -FirstPrefix $prefix -BodyRole 'text' -Role 'assistant' `
+                -ShowCopyHint:$false
             $sp = $script:Spinner[$spinIdx % $script:Spinner.Count]
-            $lines.Add(@{ text = (" " * $prefixLen) + (Themed "$sp" 'faint'); role = "assistant" })
+            [void]$lines.Add(@{ text = (" " * $prefixLen) + (Themed "$sp" 'faint'); role = "assistant" })
         }
     } elseif ($streamState -and $streamState.Done -and -not [string]::IsNullOrEmpty($streamState.Error) -and [string]::IsNullOrEmpty($streamState.Full.ToString())) {
-        $lines.Add(@{ text = (Bold "Nautilus " $th.accent) + (Themed "> " 'muted') + (Themed (Format-ApiError $streamState.Error) 'error'); role = "assistant" })
+        [void]$lines.Add(@{ text = (Bold "Nautilus " $th.accent) + (Themed "> " 'muted') + (Themed (Format-ApiError $streamState.Error) 'error'); role = "assistant" })
     }
 
     if ((@($messages).Count -eq 0) -and -not $streamState) {
@@ -3257,9 +3559,11 @@ function script:Run-TUI {
                     continue
                 }
                 if (Test-SlashMenuOpen -Buffer $inputBuffer) {
-                    # Grok-like: dismiss dropdown, keep typed buffer
+                    # Dismiss dropdown AND clear the slash buffer. Leaving a lone "/"
+                    # made the next "/theme" become "//theme" (no matches) — felt broken.
                     $script:SlashMenuDismissed = $true
                     Clear-SlashExpand
+                    $inputBuffer = ""
                     $script:EscArmUntil = $null
                     $script:NeedsFullPaint = $true
                     continue

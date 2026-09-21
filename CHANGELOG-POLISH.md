@@ -1,3 +1,16 @@
+# 0.4.3.1
+
+- Pretty language tags in `/cc` picker (PowerShell, Python, …).
+
+- **/cc multi-block picker:** accumulates fences from all scanned assistant replies (not just the newest); menu labels use agent-style `> Python code 1` / `> preview` (per-lang counters; unlabeled dupes get ` (2)`).
+
+# 0.4.3.0
+
+- **Rich replies:** assistant messages paint fenced code with a language label + soft rule chrome (not raw ```), light inline `code` / **bold**, and a copy hint (F6 / Ctrl+Alt+C / /cc) under blocks.
+- Streaming paints open fences live (label shows `...` until closed).
+- **Bugfix:** Esc on the `/` menu clears the slash buffer (no more leftover `/` turning the next command into `//theme`).
+- Copy hint suppressed while a fence is still open (streaming `...`); empty prose gaps between fences no longer double-pad.
+
 # 0.4.2.6
 
 - **After `/update`:** opens a new PowerShell window, runs `nautilus` there, then closes the old window (PS 5.1 still cannot reload the module in-process). Falls back to manual instructions if spawn fails.
