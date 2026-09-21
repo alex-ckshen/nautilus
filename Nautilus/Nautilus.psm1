@@ -2,10 +2,10 @@
     Nautilus - a pure-PowerShell futuristic TUI AI assistant.
     JARVIS-style personality, Gemini-powered, blue sci-fi aesthetic.
     Public command: nautilus  (alias: naut)
-    Version: 0.4.3.4
+    Version: 0.4.3.5
 #>
 
-$script:NautilusVersion = "0.4.3.4"
+$script:NautilusVersion = "0.4.3.5"
 $script:TuiActive = $false
 $script:TuiForceExit = $false
 $script:CancelHandlerRegistered = $false
@@ -1921,9 +1921,59 @@ function script:Enable-Mouse {
 }
 function script:Disable-Mouse {
     try {
-        Write-Host "$script:Esc[?1000l$script:Esc[?1006l" -NoNewline
+        Write-Host "$script:Esc[?1000l$script:Esc[?1006l$script:Esc[?1003l" -NoNewline
     } catch { }
     $script:MouseEnabled = $false
+}
+
+function script:Reset-NautilusConsole {
+    # Best-effort clean slate before Enter-TUI / post-update child launch.
+    # Clears mouse/alt-screen residue, Ctrl+C-as-input, and pending key junk that
+    # can leave letter KeyChar=0 on PS 5.1 after a parent TUI teardown race.
+    try { [Console]::TreatControlCAsInput = $false } catch { }
+    try {
+        while ([Console]::KeyAvailable) { [void][Console]::ReadKey($true) }
+    } catch { }
+    try {
+        $esc = [char]27
+        # mouse off (1000/1003/1006) + leave alt-screen + show cursor + SGR reset
+        [Console]::Write("$esc[?1000l$esc[?1003l$esc[?1006l$esc[?1049l$esc[?25h$esc[0m")
+        try { [Console]::Out.Flush() } catch { }
+    } catch {
+        try {
+            Write-Host "$script:Esc[?1000l$script:Esc[?1003l$script:Esc[?1006l$script:Esc[?1049l$script:Esc[?25h$script:Esc[0m" -NoNewline
+        } catch { }
+    }
+    # Windows: FlushConsoleInputBuffer so spawn-race CSI / focus events cannot
+    # poison the first ReadKey as KeyChar=0 (letters vanish; / and ? still work).
+    if ($env:OS -eq 'Windows_NT') {
+        try {
+            $sig = @'
+[DllImport("kernel32.dll", SetLastError=true)] public static extern System.IntPtr GetStdHandle(int nStdHandle);
+[DllImport("kernel32.dll", SetLastError=true)] public static extern bool FlushConsoleInputBuffer(System.IntPtr hConsoleInput);
+'@
+            $type = $null
+            try { $type = [Nautilus.NautilusConFlush] } catch { $type = $null }
+            if (-not $type) {
+                try {
+                    $type = Add-Type -MemberDefinition $sig -Name 'NautilusConFlush' -Namespace 'Nautilus' -PassThru -ErrorAction Stop
+                } catch {
+                    try { $type = [Nautilus.NautilusConFlush] } catch { $type = $null }
+                }
+            }
+            if ($type) {
+                $hIn = $type::GetStdHandle(-10)
+                if ($hIn -ne [IntPtr]::Zero -and $hIn.ToInt64() -ne -1) {
+                    [void]$type::FlushConsoleInputBuffer($hIn)
+                }
+            }
+        } catch { }
+    }
+    try {
+        [Console]::BackgroundColor = [ConsoleColor]::Black
+        [Console]::ForegroundColor = [ConsoleColor]::Gray
+    } catch { }
+    try { [Console]::CursorVisible = $true } catch { }
 }
 
 function script:New-SynthKeyInfo {
@@ -2282,6 +2332,8 @@ function script:Enter-TUI {
 function script:Exit-TUI {
     # Always restore console — never let clipboard/mouse/paint failures leave alt-screen stuck.
     # Restore [Console] colors only (we never touch RawUI.*Color — see Enter-TUI 0.4.3.3).
+    # Order matters for /update: mouse/alt-screen MUST be off + flushed BEFORE
+    # Start-NautilusFreshSession spawns the child (0.4.3.5).
     try {
         if ($null -ne $script:SavedConsoleBg) { [Console]::BackgroundColor = $script:SavedConsoleBg }
         if ($null -ne $script:SavedConsoleFg) { [Console]::ForegroundColor = $script:SavedConsoleFg }
@@ -2289,12 +2341,14 @@ function script:Exit-TUI {
     try { Disable-Mouse } catch { }
     try {
         $esc = [char]27
-        [Console]::Write("$esc[?1000l$esc[?1006l$esc[?1049l$esc[?25h$esc[0m")
+        [Console]::Write("$esc[?1000l$esc[?1003l$esc[?1006l$esc[?1049l$esc[?25h$esc[0m")
+        try { [Console]::Out.Flush() } catch { }
     } catch {
         try {
-            Write-Host "$script:Esc[?1000l$script:Esc[?1006l$script:Esc[?1049l$script:Esc[?25h$script:Esc[0m" -NoNewline
+            Write-Host "$script:Esc[?1000l$script:Esc[?1003l$script:Esc[?1006l$script:Esc[?1049l$script:Esc[?25h$script:Esc[0m" -NoNewline
         } catch { }
     }
+    try { [Console]::TreatControlCAsInput = $false } catch { }
     try { [Console]::CursorVisible = $true } catch { }
     $script:TuiActive = $false
 }
@@ -3307,6 +3361,7 @@ function script:Run-TUI {
         $script:Config.theme = "Nautilus"
     }
 
+    try { Reset-NautilusConsole } catch { }
     Enable-VT
     $messages = @(Load-History)
     foreach ($m in $messages) {
@@ -4219,11 +4274,23 @@ function script:Run-Theme {
 function script:Start-NautilusFreshSession {
     # Spawn a NEW PowerShell that loads the on-disk module and runs nautilus.
     # Used after self-update so PS 5.1 never has to Import-Module -Force itself.
-    # 0.4.3.4: write ~/.nautilus/relaunch.ps1 and Start-Process -NoProfile -File
-    # so the child gets a clean console (sleep + manifest check + key drain)
-    # instead of a fragile multiline -Command that raced the parent teardown.
+    # 0.4.3.5: Exit-TUI/flush already ran in Run-TUI finally; belt-and-suspenders
+    # console reset here, then write ~/.nautilus/relaunch.ps1 and Start-Process
+    # with a NEW console (-WorkingDirectory home, single-string ArgumentList,
+    # UseShellExecute on Windows) so the child never inherits mouse/alt-screen.
     # Returns $true if a process was started.
     $esc = $script:Esc
+
+    # Belt: ensure mouse/alt-screen are off + flushed before any child spawn
+    # (covers nautilus update CLI path that never Enter-TUI'd).
+    try { Reset-NautilusConsole } catch {
+        try { Disable-Mouse } catch { }
+        try {
+            [Console]::Write("$esc[?1000l$esc[?1003l$esc[?1006l$esc[?1049l$esc[?25h$esc[0m")
+            try { [Console]::Out.Flush() } catch { }
+        } catch { }
+    }
+
     $manifest = $null
     try {
         $candidate = Join-Path $script:ModuleRoot "Nautilus.psd1"
@@ -4274,18 +4341,28 @@ function script:Start-NautilusFreshSession {
         }
     } catch { }
 
+    $workDir = $null
+    try {
+        if ($env:USERPROFILE -and (Test-Path -LiteralPath $env:USERPROFILE)) { $workDir = $env:USERPROFILE }
+    } catch { }
+    if (-not $workDir) {
+        try { if ($HOME -and (Test-Path -LiteralPath $HOME)) { $workDir = $HOME } } catch { }
+    }
+    if (-not $workDir) { $workDir = $installRoot }
+
     $mEsc = ([string]$manifest).Replace("'", "''")
-    # Tiny bootstrap: sleep so parent teardown / file copy settle, verify
-    # manifest readable, clean console encoding, drain pending keys, then
-    # Import + nautilus. Enter-TUI still re-calls Enable-VT after canvas.
+    # Child bootstrap 0.4.3.5: longer settle, Reset-NautilusConsole equivalent
+    # (mouse/alt-screen off, TreatControlCAsInput, key drain, FlushConsoleInputBuffer),
+    # Clear-Host after Import, Enable-VT before nautilus.
     $relaunchBody = @"
-# Nautilus post-update relaunch bootstrap (0.4.3.4) — do not edit by hand
+# Nautilus post-update relaunch bootstrap (0.4.3.5) — do not edit by hand
 `$ErrorActionPreference = 'Stop'
 try { `$Host.UI.RawUI.WindowTitle = 'Nautilus' } catch { }
-Start-Sleep -Seconds 2
+# Settle: parent Exit-TUI + file copy + module unlock
+Start-Sleep -Seconds 3
 `$manifest = '$mEsc'
 `$ok = `$false
-for (`$i = 0; `$i -lt 10; `$i++) {
+for (`$i = 0; `$i -lt 15; `$i++) {
   if (Test-Path -LiteralPath `$manifest) {
     try {
       `$raw = Get-Content -LiteralPath `$manifest -Raw -ErrorAction Stop
@@ -4300,20 +4377,52 @@ if (-not `$ok) {
   try { Read-Host 'Press Enter to close' } catch { }
   return
 }
+# Clean console — never inherit parent mouse/alt-screen / Ctrl+C-as-input
+try { [Console]::TreatControlCAsInput = `$false } catch { }
+try {
+  `$esc = [char]27
+  [Console]::Write("`$esc[?1000l`$esc[?1003l`$esc[?1006l`$esc[?1049l`$esc[?25h`$esc[0m")
+  try { [Console]::Out.Flush() } catch { }
+} catch { }
 try {
   [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
   `$OutputEncoding = [System.Text.Encoding]::UTF8
 } catch { }
-# Drain any keys left over from the parent window / spawn race
+try {
+  [Console]::BackgroundColor = [ConsoleColor]::Black
+  [Console]::ForegroundColor = [ConsoleColor]::Gray
+} catch { }
+# Drain pending keys (parent spawn / focus / CSI junk)
 try {
   while ([Console]::KeyAvailable) { [void][Console]::ReadKey(`$true) }
 } catch { }
+# Windows: FlushConsoleInputBuffer
+if (`$env:OS -eq 'Windows_NT') {
+  try {
+    `$sig = @'
+[DllImport("kernel32.dll", SetLastError=true)] public static extern System.IntPtr GetStdHandle(int nStdHandle);
+[DllImport("kernel32.dll", SetLastError=true)] public static extern bool FlushConsoleInputBuffer(System.IntPtr hConsoleInput);
+'@
+    `$type = `$null
+    try { `$type = [Nautilus.NautilusConFlush] } catch { `$type = `$null }
+    if (-not `$type) {
+      try { `$type = Add-Type -MemberDefinition `$sig -Name 'NautilusConFlush' -Namespace 'Nautilus' -PassThru -ErrorAction Stop } catch {
+        try { `$type = [Nautilus.NautilusConFlush] } catch { `$type = `$null }
+      }
+    }
+    if (`$type) {
+      `$hIn = `$type::GetStdHandle(-10)
+      if (`$hIn -ne [IntPtr]::Zero -and `$hIn.ToInt64() -ne -1) { [void]`$type::FlushConsoleInputBuffer(`$hIn) }
+    }
+  } catch { }
+}
 try {
   Import-Module -Name `$manifest -Force -ErrorAction Stop
-  # Enable-VT is module-private; Enter-TUI re-enables after canvas. Best-effort probe:
+  try { Clear-Host } catch { }
+  # Enable-VT is module-private; call before nautilus so VT is live before canvas.
   try {
     `$mod = Get-Module Nautilus
-    if (`$mod) { & `$mod.NewBoundScriptBlock({ try { Enable-VT } catch { } }) }
+    if (`$mod) { & `$mod.NewBoundScriptBlock({ try { Reset-NautilusConsole } catch { }; try { Enable-VT } catch { } }) }
   } catch { }
   nautilus
 } catch {
@@ -4336,9 +4445,27 @@ try {
     # -NoProfile: avoid profile re-importing a stale/old module before -File runs.
     # -File: more reliable than multiline -Command on PS 5.1.
     # -NoExit: keep the window if nautilus exits so errors are visible.
-    $argList = @('-NoLogo', '-NoProfile', '-NoExit', '-File', $relaunchPath)
+    # Single-string ArgumentList: PS 5.1 Start-Process array join is unreliable.
+    $argStr = "-NoLogo -NoProfile -NoExit -File `"$relaunchPath`""
     try {
-        Start-Process -FilePath $exe -ArgumentList $argList | Out-Null
+        if ($env:OS -eq 'Windows_NT') {
+            # UseShellExecute=true forces a brand-new console window (does not
+            # share the parent's conhost / mouse / alt-screen state).
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = $exe
+            $psi.Arguments = $argStr
+            $psi.WorkingDirectory = $workDir
+            $psi.UseShellExecute = $true
+            $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Normal
+            [void][System.Diagnostics.Process]::Start($psi)
+        } else {
+            # Linux/macOS pwsh: -WindowStyle is not supported on Start-Process.
+            try {
+                Start-Process -FilePath $exe -ArgumentList $argStr -WorkingDirectory $workDir | Out-Null
+            } catch {
+                Start-Process -FilePath $exe -ArgumentList $argStr | Out-Null
+            }
+        }
         return $true
     } catch {
         Write-Host "$esc[38;5;203m  Failed to open new window: $($_.Exception.Message)$esc[0m"
@@ -4346,9 +4473,6 @@ try {
     }
 }
 
-# ===========================================================================
-#  UPDATE / UNINSTALL
-# ===========================================================================
 function script:Run-Update {
     $esc = $script:Esc
     Write-Host "$esc[38;5;81m  Updating Nautilus from $script:RepoBase ...$esc[0m"
@@ -4503,8 +4627,9 @@ function script:Run-Update {
     try { $launched = [bool](Start-NautilusFreshSession) } catch { $launched = $false }
     if ($launched) {
         Write-Host "$esc[38;5;245m  New window started. Closing this one so the old module cannot stay loaded.$esc[0m"
-        # Give the child time to attach a clean console before we tear down (0.4.3.4).
-        try { Start-Sleep -Milliseconds 1400 } catch { }
+        # Give the child time to pass its settle sleep + unlock module files (0.4.3.5).
+        # Parent should exit BEFORE child Import-Module when possible.
+        try { Start-Sleep -Milliseconds 2200 } catch { }
     } else {
         Write-Host "$esc[38;5;221m  Could not auto-relaunch. Close this window, open a NEW PowerShell, then run: nautilus$esc[0m"
         Write-Host "$esc[38;5;245m  (PS 5.1 cannot safely reload Nautilus in the same session.)$esc[0m"

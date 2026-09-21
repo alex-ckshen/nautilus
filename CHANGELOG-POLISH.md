@@ -1,3 +1,7 @@
+# 0.4.3.5
+
+- **Hardening: post-/update relaunch typing (Windows-focused)** — Linux tmux PTY baseline + relaunch.ps1 letter typing still PASS (cannot repro KeyChar=0 letter-death here). Still ship: `Reset-NautilusConsole` (mouse 1000/1003/1006 off, leave alt-screen, `TreatControlCAsInput=$false`, KeyAvailable drain, Windows `FlushConsoleInputBuffer`) called from Exit-TUI flush path, Run-TUI entry, and child bootstrap; child sleep 3s + Clear-Host after Import + Enable-VT before `nautilus`; Windows spawn via `ProcessStartInfo` UseShellExecute + WorkingDirectory `$env:USERPROFILE` + single-string `-File` args (no shared conhost); parent wait ~2200ms so exit precedes child Import.
+
 # 0.4.3.4
 
 - **Fix: post-/update relaunch input dead until manual reload** — child window now boots via `~/.nautilus/relaunch.ps1` (`Start-Process -NoLogo -NoProfile -NoExit -File`) instead of a fragile multiline `-Command`. Bootstrap sleeps ~2s, verifies the updated manifest is readable, sets UTF-8 console encoding, drains pending `KeyAvailable` junk, then `Import-Module` + `nautilus` (Enter-TUI still re-calls `Enable-VT`). Parent waits ~1400ms before exit so the child attaches cleanly.
