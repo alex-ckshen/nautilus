@@ -57,5 +57,10 @@ pwsh -NoLogo -Command '
   [void][System.Management.Automation.Language.Parser]::ParseFile($psm1, [ref]$tok, [ref]$err)
   if ($err -and $err.Count) { $err | ForEach-Object { $_.ToString() }; exit 1 }
   Write-Host "PARSE OK"
+  $raw = Get-Content -LiteralPath $psm1 -Raw
+  if ($raw -notmatch "function script:Get-ThemeBgCode") { Write-Host "FAIL: Get-ThemeBgCode missing"; exit 1 }
+  if ($raw -notmatch "function script:Get-CanvasBgAnsi") { Write-Host "FAIL: Get-CanvasBgAnsi missing"; exit 1 }
+  if ($raw -notmatch "bg\s*=\s*23[234]") { Write-Host "FAIL: theme bg missing"; exit 1 }
+  Write-Host "CANVAS HELPERS OK"
 '
 echo "SMOKE OK"

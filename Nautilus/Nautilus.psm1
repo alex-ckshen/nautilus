@@ -2,15 +2,19 @@
     Nautilus - a pure-PowerShell futuristic TUI AI assistant.
     JARVIS-style personality, Gemini-powered, blue sci-fi aesthetic.
     Public command: nautilus  (alias: naut)
-    Version: 0.4.3.1
+    Version: 0.4.3.2
 #>
 
-$script:NautilusVersion = "0.4.3.1"
+$script:NautilusVersion = "0.4.3.2"
 $script:TuiActive = $false
 $script:TuiForceExit = $false
 $script:CancelHandlerRegistered = $false
 $script:LastMaxStart = 0
 $script:StatusIdx = 0
+$script:SavedConsoleBg = $null
+$script:SavedConsoleFg = $null
+$script:SavedRawUiBg = $null
+$script:SavedRawUiFg = $null
 $script:PendingUpdateVersion = $null
 $script:_UpdateCheckState = $null
 $script:UseRoundedBorders = $true
@@ -150,6 +154,7 @@ $script:Themes = [ordered]@{
         warn     = 178
         error    = 203
         titlebar = 236
+        bg       = 233   # near-black canvas (not host blue)
     }
     Midnight = @{
         text     = 251
@@ -168,6 +173,7 @@ $script:Themes = [ordered]@{
         warn     = 178
         error    = 203
         titlebar = 235
+        bg       = 232   # near-black canvas
     }
     Cyber = @{
         text     = 252
@@ -186,6 +192,7 @@ $script:Themes = [ordered]@{
         warn     = 221
         error    = 203
         titlebar = 236
+        bg       = 234   # near-black canvas
     }
     Abyss = @{
         text     = 251
@@ -204,6 +211,7 @@ $script:Themes = [ordered]@{
         warn     = 180
         error    = 174
         titlebar = 234
+        bg       = 233   # near-black canvas
     }
 }
 
@@ -211,8 +219,29 @@ $script:Themes = [ordered]@{
 #  ANSI HELPERS
 # ===========================================================================
 $script:Esc = [char]27
-function script:Get-C { param([string]$t, [int]$code) "$script:Esc[38;5;${code}m$t$script:Esc[0m" }
-function script:Bold { param([string]$t, [int]$code) "$script:Esc[1;38;5;${code}m$t$script:Esc[0m" }
+function script:Get-ThemeBgCode {
+    # 256-color canvas background for TUI (dark, never host blue).
+    $th = $script:CurrentTheme
+    if (-not $th) { $th = $script:Themes["Nautilus"] }
+    if ($th -and (Test-DictHasKey $th 'bg') -and $null -ne $th.bg) {
+        try { return [int]$th.bg } catch { }
+    }
+    return 233
+}
+function script:Get-CanvasBgAnsi {
+    $bg = Get-ThemeBgCode
+    return "$script:Esc[48;5;${bg}m"
+}
+function script:Get-C {
+    param([string]$t, [int]$code)
+    $cbg = Get-CanvasBgAnsi
+    "$script:Esc[38;5;${code}m$t$script:Esc[0m$cbg"
+}
+function script:Bold {
+    param([string]$t, [int]$code)
+    $cbg = Get-CanvasBgAnsi
+    "$script:Esc[1;38;5;${code}m$t$script:Esc[0m$cbg"
+}
 function script:Dim  {
     param([string]$t)
     $th = $script:CurrentTheme
@@ -222,7 +251,8 @@ function script:Dim  {
         if ((Test-DictHasKey $th 'faint') -and $th.faint) { $code = [int]$th.faint }
         elseif ($th.dim) { $code = [int]$th.dim }
     }
-    return "$script:Esc[38;5;${code}m$t$script:Esc[0m"
+    $cbg = Get-CanvasBgAnsi
+    return "$script:Esc[38;5;${code}m$t$script:Esc[0m$cbg"
 }
 
 
@@ -989,7 +1019,8 @@ function script:Themed {
         'titlebar'  { $th.titlebar }
         default     { if (Test-DictHasKey $th 'text') { $th.text } else { 252 } }
     }
-    return "$script:Esc[38;5;${code}m$t$script:Esc[0m"
+    $cbg = Get-CanvasBgAnsi
+    return "$script:Esc[38;5;${code}m$t$script:Esc[0m$cbg"
 }
 
 # ===========================================================================
@@ -1066,7 +1097,8 @@ function script:Format-InlineMarkdown {
             while ($j + 1 -lt $n -and -not ($Text[$j] -eq [char]42 -and $Text[$j + 1] -eq [char]42)) { $j++ }
             if ($j + 1 -lt $n) {
                 $inner = $Text.Substring($i + 2, $j - $i - 2)
-                [void]$sb.Append("$esc[1m$esc[38;5;${boldCode}m$inner$esc[0m$esc[38;5;${baseCode}m")
+                $cbg = Get-CanvasBgAnsi
+                [void]$sb.Append("$esc[1m$esc[38;5;${boldCode}m$inner$esc[0m$cbg$esc[38;5;${baseCode}m")
                 $i = $j + 2
                 continue
             }
@@ -1074,7 +1106,8 @@ function script:Format-InlineMarkdown {
         [void]$sb.Append($Text[$i])
         $i++
     }
-    [void]$sb.Append("$esc[0m")
+    $cbg = Get-CanvasBgAnsi
+    [void]$sb.Append("$esc[0m$cbg")
     return $sb.ToString()
 }
 
@@ -2210,11 +2243,30 @@ function script:Show-ShortcutsHelp {
 }
 
 function script:Enter-TUI {
+    # Save host colors — PS 5.1 classic blue conhost inherits BackgroundColor on SGR 0 / clears.
+    try {
+        $script:SavedConsoleBg = [Console]::BackgroundColor
+        $script:SavedConsoleFg = [Console]::ForegroundColor
+    } catch { }
+    try {
+        $ui = $Host.UI.RawUI
+        $script:SavedRawUiBg = $ui.BackgroundColor
+        $script:SavedRawUiFg = $ui.ForegroundColor
+    } catch { }
+    try {
+        [Console]::BackgroundColor = [ConsoleColor]::Black
+        [Console]::ForegroundColor = [ConsoleColor]::Gray
+    } catch { }
+    try {
+        $Host.UI.RawUI.BackgroundColor = [ConsoleColor]::Black
+        $Host.UI.RawUI.ForegroundColor = [ConsoleColor]::Gray
+    } catch { }
     try { [Console]::CursorVisible = $false } catch { }
     try {
         Write-Host "$script:Esc[?1049h" -NoNewline   # alternate screen
         Write-Host "$script:Esc[?25l" -NoNewline     # hide cursor
-        Write-Host "$script:Esc[2J" -NoNewline       # clear once on enter
+        $cbg = Get-CanvasBgAnsi
+        Write-Host "${cbg}$script:Esc[2J" -NoNewline # canvas bg then clear (not bare 2J)
         Enable-Mouse                                  # best-effort wheel / click
     } catch {
         throw "Failed to enter alternate screen. Use a real console host (Windows Terminal / conhost)."
@@ -2232,6 +2284,15 @@ function script:Enter-TUI {
 }
 function script:Exit-TUI {
     # Always restore console — never let clipboard/mouse/paint failures leave alt-screen stuck.
+    # Restore saved host colors first (PS 5.1 blue conhost), then mouse/alt-screen teardown.
+    try {
+        if ($null -ne $script:SavedConsoleBg) { [Console]::BackgroundColor = $script:SavedConsoleBg }
+        if ($null -ne $script:SavedConsoleFg) { [Console]::ForegroundColor = $script:SavedConsoleFg }
+    } catch { }
+    try {
+        if ($null -ne $script:SavedRawUiBg) { $Host.UI.RawUI.BackgroundColor = $script:SavedRawUiBg }
+        if ($null -ne $script:SavedRawUiFg) { $Host.UI.RawUI.ForegroundColor = $script:SavedRawUiFg }
+    } catch { }
     try { Disable-Mouse } catch { }
     try {
         $esc = [char]27
@@ -2252,6 +2313,14 @@ function script:Register-TuiCancelHandler {
         $script:CancelHandler = [ConsoleCancelEventHandler]{
             param($sender, $e)
             $e.Cancel = $true
+            try {
+                if ($null -ne $script:SavedConsoleBg) { [Console]::BackgroundColor = $script:SavedConsoleBg }
+                if ($null -ne $script:SavedConsoleFg) { [Console]::ForegroundColor = $script:SavedConsoleFg }
+            } catch { }
+            try {
+                if ($null -ne $script:SavedRawUiBg) { $Host.UI.RawUI.BackgroundColor = $script:SavedRawUiBg }
+                if ($null -ne $script:SavedRawUiFg) { $Host.UI.RawUI.ForegroundColor = $script:SavedRawUiFg }
+            } catch { }
             try {
                 $esc = [char]27
                 [Console]::Write("$esc[?1000l$esc[?1006l$esc[?1049l$esc[?25h$esc[0m")
@@ -2282,7 +2351,8 @@ function script:Begin-Frame {
     $script:FrameSb = New-Object System.Text.StringBuilder 16384
     [void]$script:FrameSb.Append("$script:Esc[?2026h")
     if ($FullClear) {
-        [void]$script:FrameSb.Append("$script:Esc[H$script:Esc[2J")
+        $cbg = Get-CanvasBgAnsi
+        [void]$script:FrameSb.Append("$cbg$script:Esc[H$script:Esc[2J")
         $script:NeedsFullClear = $false
     } else {
         [void]$script:FrameSb.Append("$script:Esc[H")
@@ -2304,7 +2374,8 @@ function script:End-Frame {
 }
 
 function script:Clear-Screen {
-    Write-Host "$script:Esc[H$script:Esc[2J" -NoNewline
+    $cbg = Get-CanvasBgAnsi
+    Write-Host "$cbg$script:Esc[H$script:Esc[2J" -NoNewline
 }
 
 function script:Write-At {
@@ -2318,7 +2389,8 @@ function script:Write-At {
         if ($maxH -gt 0 -and $row -gt $maxH) { return }
         if ($maxW -gt 0 -and $col -gt $maxW) { return }
     } catch { }
-    $suffix = if ($ClearEol) { "$script:Esc[K" } else { "" }
+    # ESC[K inherits current bg; ensure canvas bg so wipe is not host blue on PS 5.1 conhost.
+    $suffix = if ($ClearEol) { "$(Get-CanvasBgAnsi)$script:Esc[K" } else { "" }
     $chunk = "$script:Esc[$($row);$($col)H$text$suffix"
     if ($null -ne $script:FrameSb) {
         [void]$script:FrameSb.Append($chunk)

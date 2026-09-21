@@ -1,3 +1,7 @@
+# 0.4.3.2
+
+- **Fix: PS 5.1 classic blue conhost canvas** — themes now carry a near-black `bg` (256-color); Enter-TUI sets Black/Gray host colors and clears with canvas `48;5;bg` before `2J`; Begin-Frame/Clear-Screen/Write-At `-ClearEol` and Themed/Get-C/Bold/Dim re-apply canvas bg after SGR 0 so gaps and EOL wipes are not host blue. Exit-TUI/CancelKeyPress restore saved console colors.
+
 # 0.4.3.1
 
 - Pretty language tags in `/cc` picker (PowerShell, Python, …).
