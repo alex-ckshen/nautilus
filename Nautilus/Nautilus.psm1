@@ -2,10 +2,10 @@
     Nautilus - a pure-PowerShell futuristic TUI AI assistant.
     JARVIS-style personality, Gemini-powered, blue sci-fi aesthetic.
     Public command: nautilus  (alias: naut)
-    Version: 0.4.3.3
+    Version: 0.4.3.4
 #>
 
-$script:NautilusVersion = "0.4.3.3"
+$script:NautilusVersion = "0.4.3.4"
 $script:TuiActive = $false
 $script:TuiForceExit = $false
 $script:CancelHandlerRegistered = $false
@@ -4219,6 +4219,9 @@ function script:Run-Theme {
 function script:Start-NautilusFreshSession {
     # Spawn a NEW PowerShell that loads the on-disk module and runs nautilus.
     # Used after self-update so PS 5.1 never has to Import-Module -Force itself.
+    # 0.4.3.4: write ~/.nautilus/relaunch.ps1 and Start-Process -NoProfile -File
+    # so the child gets a clean console (sleep + manifest check + key drain)
+    # instead of a fragile multiline -Command that raced the parent teardown.
     # Returns $true if a process was started.
     $esc = $script:Esc
     $manifest = $null
@@ -4263,12 +4266,55 @@ function script:Start-NautilusFreshSession {
         return $false
     }
 
+    $installRoot = $script:InstallRoot
+    if (-not $installRoot) { $installRoot = Join-Path $HOME ".nautilus" }
+    try {
+        if (-not (Test-Path -LiteralPath $installRoot)) {
+            New-Item -ItemType Directory -Path $installRoot -Force | Out-Null
+        }
+    } catch { }
+
     $mEsc = ([string]$manifest).Replace("'", "''")
-    # -NoExit keeps the window if nautilus exits; Import from the just-updated disk path.
-    $command = @"
-`$Host.UI.RawUI.WindowTitle = 'Nautilus'
+    # Tiny bootstrap: sleep so parent teardown / file copy settle, verify
+    # manifest readable, clean console encoding, drain pending keys, then
+    # Import + nautilus. Enter-TUI still re-calls Enable-VT after canvas.
+    $relaunchBody = @"
+# Nautilus post-update relaunch bootstrap (0.4.3.4) — do not edit by hand
+`$ErrorActionPreference = 'Stop'
+try { `$Host.UI.RawUI.WindowTitle = 'Nautilus' } catch { }
+Start-Sleep -Seconds 2
+`$manifest = '$mEsc'
+`$ok = `$false
+for (`$i = 0; `$i -lt 10; `$i++) {
+  if (Test-Path -LiteralPath `$manifest) {
+    try {
+      `$raw = Get-Content -LiteralPath `$manifest -Raw -ErrorAction Stop
+      if (`$raw -match 'ModuleVersion') { `$ok = `$true; break }
+    } catch { }
+  }
+  Start-Sleep -Milliseconds 200
+}
+if (-not `$ok) {
+  Write-Host "Nautilus relaunch: manifest not readable yet: `$manifest" -ForegroundColor Red
+  Write-Host 'Update may still be settling. Close this window and run: nautilus' -ForegroundColor Yellow
+  try { Read-Host 'Press Enter to close' } catch { }
+  return
+}
 try {
-  Import-Module -Name '$mEsc' -Force -ErrorAction Stop
+  [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+  `$OutputEncoding = [System.Text.Encoding]::UTF8
+} catch { }
+# Drain any keys left over from the parent window / spawn race
+try {
+  while ([Console]::KeyAvailable) { [void][Console]::ReadKey(`$true) }
+} catch { }
+try {
+  Import-Module -Name `$manifest -Force -ErrorAction Stop
+  # Enable-VT is module-private; Enter-TUI re-enables after canvas. Best-effort probe:
+  try {
+    `$mod = Get-Module Nautilus
+    if (`$mod) { & `$mod.NewBoundScriptBlock({ try { Enable-VT } catch { } }) }
+  } catch { }
   nautilus
 } catch {
   Write-Host `$_.Exception.Message -ForegroundColor Red
@@ -4277,13 +4323,22 @@ try {
 }
 "@
 
+    $relaunchPath = Join-Path $installRoot "relaunch.ps1"
     try {
-        if ($env:OS -eq 'Windows_NT') {
-            Start-Process -FilePath $exe -ArgumentList @('-NoLogo', '-NoExit', '-Command', $command) | Out-Null
-        } else {
-            # Best-effort on non-Windows (dev hosts): new process, same TTY family
-            Start-Process -FilePath $exe -ArgumentList @('-NoLogo', '-NoExit', '-Command', $command) | Out-Null
-        }
+        # UTF-8 with BOM helps Windows PowerShell 5.1 -File parse reliably
+        $utf8Bom = New-Object System.Text.UTF8Encoding $true
+        [System.IO.File]::WriteAllText($relaunchPath, $relaunchBody, $utf8Bom)
+    } catch {
+        Write-Host "$esc[38;5;203m  Could not write relaunch.ps1: $($_.Exception.Message)$esc[0m"
+        return $false
+    }
+
+    # -NoProfile: avoid profile re-importing a stale/old module before -File runs.
+    # -File: more reliable than multiline -Command on PS 5.1.
+    # -NoExit: keep the window if nautilus exits so errors are visible.
+    $argList = @('-NoLogo', '-NoProfile', '-NoExit', '-File', $relaunchPath)
+    try {
+        Start-Process -FilePath $exe -ArgumentList $argList | Out-Null
         return $true
     } catch {
         Write-Host "$esc[38;5;203m  Failed to open new window: $($_.Exception.Message)$esc[0m"
@@ -4448,7 +4503,8 @@ function script:Run-Update {
     try { $launched = [bool](Start-NautilusFreshSession) } catch { $launched = $false }
     if ($launched) {
         Write-Host "$esc[38;5;245m  New window started. Closing this one so the old module cannot stay loaded.$esc[0m"
-        try { Start-Sleep -Milliseconds 500 } catch { }
+        # Give the child time to attach a clean console before we tear down (0.4.3.4).
+        try { Start-Sleep -Milliseconds 1400 } catch { }
     } else {
         Write-Host "$esc[38;5;221m  Could not auto-relaunch. Close this window, open a NEW PowerShell, then run: nautilus$esc[0m"
         Write-Host "$esc[38;5;245m  (PS 5.1 cannot safely reload Nautilus in the same session.)$esc[0m"

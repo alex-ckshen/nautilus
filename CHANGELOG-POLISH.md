@@ -1,3 +1,7 @@
+# 0.4.3.4
+
+- **Fix: post-/update relaunch input dead until manual reload** — child window now boots via `~/.nautilus/relaunch.ps1` (`Start-Process -NoLogo -NoProfile -NoExit -File`) instead of a fragile multiline `-Command`. Bootstrap sleeps ~2s, verifies the updated manifest is readable, sets UTF-8 console encoding, drains pending `KeyAvailable` junk, then `Import-Module` + `nautilus` (Enter-TUI still re-calls `Enable-VT`). Parent waits ~1400ms before exit so the child attaches cleanly.
+
 # 0.4.3.3
 
 - **Fix: PS 5.1 typed input dead after dark-canvas** — `$Host.UI.RawUI.BackgroundColor` / `ForegroundColor` assigns in Enter-TUI rewrote the buffer and could clobber VT console mode on reload, so letters often failed to appear (`/` and `?` still worked). Dropped all RawUI color save/set/restore; keep `[Console]::BackgroundColor/ForegroundColor` Black/Gray + ANSI canvas `Get-CanvasBgAnsi` + `2J`. Re-call `Enable-VT` at end of Enter-TUI (after colors + alt-screen + mouse) so VT processing is restored if a color set cleared it. Exit-TUI / CancelKeyPress restore Console colors only.

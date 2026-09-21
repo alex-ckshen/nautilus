@@ -64,7 +64,19 @@ pwsh -NoLogo -Command '
   if ($raw -notmatch "function script:Get-CanvasBgAnsi") { Write-Host "FAIL: Get-CanvasBgAnsi missing"; exit 1 }
   if ($raw -notmatch "bg\s*=\s*23[234]") { Write-Host "FAIL: theme bg missing"; exit 1 }
   Write-Host "CANVAS HELPERS OK"
-  if ($raw -notmatch "0\.4\.3\.3" -or $man -notmatch "0\.4\.3\.3") { Write-Host "FAIL: version not 0.4.3.3"; exit 1 }
+  if ($raw -notmatch "0\.4\.3\.4" -or $man -notmatch "0\.4\.3\.4") { Write-Host "FAIL: version not 0.4.3.4"; exit 1 }
+  # 0.4.3.4 relaunch bootstrap hardening
+  $mFresh = [regex]::Match($raw, "function script:Start-NautilusFreshSession\s*\{(?<body>.*?)\nfunction script:Run-Update", "Singleline")
+  if (-not $mFresh.Success) { Write-Host "FAIL: Start-NautilusFreshSession body not found"; exit 1 }
+  $fresh = $mFresh.Groups["body"].Value
+  if ($fresh -notmatch "-NoProfile") { Write-Host "FAIL: relaunch missing -NoProfile"; exit 1 }
+  if ($fresh -notmatch "-File") { Write-Host "FAIL: relaunch missing -File"; exit 1 }
+  if ($fresh -notmatch "relaunch\.ps1") { Write-Host "FAIL: relaunch.ps1 wrapper missing"; exit 1 }
+  if ($fresh -notmatch "Start-Sleep\s+-Seconds\s+2") { Write-Host "FAIL: child sleep missing"; exit 1 }
+  if ($fresh -notmatch "KeyAvailable") { Write-Host "FAIL: key drain missing"; exit 1 }
+  if ($fresh -notmatch "ReadKey") { Write-Host "FAIL: ReadKey drain missing"; exit 1 }
+  if ($raw -notmatch "Start-Sleep\s+-Milliseconds\s+1400") { Write-Host "FAIL: parent sleep not ~1400ms"; exit 1 }
+  Write-Host "RELAUNCH BOOTSTRAP OK"
   if ($raw -match "RawUI\.(Background|Foreground)Color\s*=") { Write-Host "FAIL: RawUI color assign still present"; exit 1 }
   if ($raw -match "SavedRawUi") { Write-Host "FAIL: SavedRawUi still referenced"; exit 1 }
   $m = [regex]::Match($raw, "function script:Enter-TUI\s*\{(?<body>.*?)\nfunction script:Exit-TUI", "Singleline")
