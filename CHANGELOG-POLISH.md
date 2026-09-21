@@ -1,3 +1,7 @@
+# 0.4.3.3
+
+- **Fix: PS 5.1 typed input dead after dark-canvas** — `$Host.UI.RawUI.BackgroundColor` / `ForegroundColor` assigns in Enter-TUI rewrote the buffer and could clobber VT console mode on reload, so letters often failed to appear (`/` and `?` still worked). Dropped all RawUI color save/set/restore; keep `[Console]::BackgroundColor/ForegroundColor` Black/Gray + ANSI canvas `Get-CanvasBgAnsi` + `2J`. Re-call `Enable-VT` at end of Enter-TUI (after colors + alt-screen + mouse) so VT processing is restored if a color set cleared it. Exit-TUI / CancelKeyPress restore Console colors only.
+
 # 0.4.3.2
 
 - **Fix: PS 5.1 classic blue conhost canvas** — themes now carry a near-black `bg` (256-color); Enter-TUI sets Black/Gray host colors and clears with canvas `48;5;bg` before `2J`; Begin-Frame/Clear-Screen/Write-At `-ClearEol` and Themed/Get-C/Bold/Dim re-apply canvas bg after SGR 0 so gaps and EOL wipes are not host blue. Exit-TUI/CancelKeyPress restore saved console colors.

@@ -53,14 +53,54 @@ tmux kill-session -t "$S" 2>/dev/null || true
 
 pwsh -NoLogo -Command '
   $psm1 = Join-Path $HOME ".nautilus/Nautilus/Nautilus.psm1"
+  $psd1 = Join-Path $HOME ".nautilus/Nautilus/Nautilus.psd1"
   $tok=$null; $err=$null
   [void][System.Management.Automation.Language.Parser]::ParseFile($psm1, [ref]$tok, [ref]$err)
   if ($err -and $err.Count) { $err | ForEach-Object { $_.ToString() }; exit 1 }
   Write-Host "PARSE OK"
   $raw = Get-Content -LiteralPath $psm1 -Raw
+  $man = Get-Content -LiteralPath $psd1 -Raw
   if ($raw -notmatch "function script:Get-ThemeBgCode") { Write-Host "FAIL: Get-ThemeBgCode missing"; exit 1 }
   if ($raw -notmatch "function script:Get-CanvasBgAnsi") { Write-Host "FAIL: Get-CanvasBgAnsi missing"; exit 1 }
   if ($raw -notmatch "bg\s*=\s*23[234]") { Write-Host "FAIL: theme bg missing"; exit 1 }
   Write-Host "CANVAS HELPERS OK"
+  if ($raw -notmatch "0\.4\.3\.3" -or $man -notmatch "0\.4\.3\.3") { Write-Host "FAIL: version not 0.4.3.3"; exit 1 }
+  if ($raw -match "RawUI\.(Background|Foreground)Color\s*=") { Write-Host "FAIL: RawUI color assign still present"; exit 1 }
+  if ($raw -match "SavedRawUi") { Write-Host "FAIL: SavedRawUi still referenced"; exit 1 }
+  $m = [regex]::Match($raw, "function script:Enter-TUI\s*\{(?<body>.*?)\nfunction script:Exit-TUI", "Singleline")
+  if (-not $m.Success) { Write-Host "FAIL: Enter-TUI body not found"; exit 1 }
+  $body = $m.Groups["body"].Value
+  if ($body -match "RawUI\.(Background|Foreground)Color\s*=") { Write-Host "FAIL: Enter-TUI still assigns RawUI colors"; exit 1 }
+  $idx2j = $body.IndexOf("2J")
+  $idxMouse = $body.IndexOf("Enable-Mouse")
+  $idxVt = $body.LastIndexOf("Enable-VT")
+  if ($idx2j -lt 0 -or $idxVt -lt 0) { Write-Host "FAIL: canvas 2J or Enable-VT missing in Enter-TUI"; exit 1 }
+  if ($idxVt -le $idx2j) { Write-Host "FAIL: Enable-VT must run after canvas 2J"; exit 1 }
+  if ($idxMouse -ge 0 -and $idxVt -le $idxMouse) { Write-Host "FAIL: Enable-VT must run after Enable-Mouse"; exit 1 }
+  Write-Host "ENTER-TUI ORDER OK (no RawUI; Enable-VT after canvas)"
+  # Runtime: import module and probe Enter/Exit + EnableVtCallCount via module SessionState
+  Import-Module $psd1 -Force
+  $mod = Get-Module Nautilus
+  $sb = $mod.NewBoundScriptBlock({
+    param()
+    $script:EnableVtCallCount = 0
+    Enable-VT
+    $c1 = [int]$script:EnableVtCallCount
+    try {
+      $script:SavedConsoleBg = [Console]::BackgroundColor
+      $script:SavedConsoleFg = [Console]::ForegroundColor
+      [Console]::BackgroundColor = [ConsoleColor]::Black
+      [Console]::ForegroundColor = [ConsoleColor]::Gray
+    } catch { }
+    $enterOk = $false
+    try { Enter-TUI; $enterOk = $true } catch { Write-Host ("Enter-TUI catch: " + $_.Exception.Message) }
+    $c2 = [int]$script:EnableVtCallCount
+    if ($enterOk -and $c2 -le $c1) { throw "Enter-TUI did not invoke Enable-VT (count $c1 -> $c2)" }
+    try { Exit-TUI } catch { Write-Host ("Exit-TUI catch: " + $_.Exception.Message) }
+    "PROBE OK count=$c2 enterOk=$enterOk active=$($script:TuiActive)"
+  })
+  $result = & $sb
+  Write-Host $result
 '
+
 echo "SMOKE OK"

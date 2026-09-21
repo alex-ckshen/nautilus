@@ -2,10 +2,10 @@
     Nautilus - a pure-PowerShell futuristic TUI AI assistant.
     JARVIS-style personality, Gemini-powered, blue sci-fi aesthetic.
     Public command: nautilus  (alias: naut)
-    Version: 0.4.3.2
+    Version: 0.4.3.3
 #>
 
-$script:NautilusVersion = "0.4.3.2"
+$script:NautilusVersion = "0.4.3.3"
 $script:TuiActive = $false
 $script:TuiForceExit = $false
 $script:CancelHandlerRegistered = $false
@@ -13,8 +13,7 @@ $script:LastMaxStart = 0
 $script:StatusIdx = 0
 $script:SavedConsoleBg = $null
 $script:SavedConsoleFg = $null
-$script:SavedRawUiBg = $null
-$script:SavedRawUiFg = $null
+$script:EnableVtCallCount = 0
 $script:PendingUpdateVersion = $null
 $script:_UpdateCheckState = $null
 $script:UseRoundedBorders = $true
@@ -1635,6 +1634,8 @@ function script:Enable-VT {
     # PowerShell 7 enables VT by default; for Windows PowerShell 5.1 we must
     # flip ENABLE_VIRTUAL_TERMINAL_PROCESSING on the current console handle.
     # Never throw - module import and TUI degrade gracefully without VT.
+    # Call-count probe (0.4.3.3): Enter-TUI re-enables VT after host color sets.
+    try { $script:EnableVtCallCount = [int]$script:EnableVtCallCount + 1 } catch { $script:EnableVtCallCount = 1 }
     if ($PSVersionTable.PSVersion.Major -lt 6) {
         try {
             $sig = @'
@@ -2243,23 +2244,16 @@ function script:Show-ShortcutsHelp {
 }
 
 function script:Enter-TUI {
-    # Save host colors — PS 5.1 classic blue conhost inherits BackgroundColor on SGR 0 / clears.
+    # Save/set [Console] colors only — never assign $Host.UI.RawUI.*Color on PS 5.1:
+    # RawUI color writes rewrite the buffer and can clobber VT console mode / typed input
+    # (letters vanish; / and ? still work). Dark backdrop comes from ANSI canvas + 2J.
     try {
         $script:SavedConsoleBg = [Console]::BackgroundColor
         $script:SavedConsoleFg = [Console]::ForegroundColor
     } catch { }
     try {
-        $ui = $Host.UI.RawUI
-        $script:SavedRawUiBg = $ui.BackgroundColor
-        $script:SavedRawUiFg = $ui.ForegroundColor
-    } catch { }
-    try {
         [Console]::BackgroundColor = [ConsoleColor]::Black
         [Console]::ForegroundColor = [ConsoleColor]::Gray
-    } catch { }
-    try {
-        $Host.UI.RawUI.BackgroundColor = [ConsoleColor]::Black
-        $Host.UI.RawUI.ForegroundColor = [ConsoleColor]::Gray
     } catch { }
     try { [Console]::CursorVisible = $false } catch { }
     try {
@@ -2271,6 +2265,9 @@ function script:Enter-TUI {
     } catch {
         throw "Failed to enter alternate screen. Use a real console host (Windows Terminal / conhost)."
     }
+    # Re-enable VT after color + alt-screen setup — Console color assigns on PS 5.1
+    # can clear ENABLE_VIRTUAL_TERMINAL_PROCESSING set earlier in the session.
+    Enable-VT
     $script:TuiActive = $true
     $script:NeedsFullClear = $true
     $script:NeedsFullPaint = $true
@@ -2284,14 +2281,10 @@ function script:Enter-TUI {
 }
 function script:Exit-TUI {
     # Always restore console — never let clipboard/mouse/paint failures leave alt-screen stuck.
-    # Restore saved host colors first (PS 5.1 blue conhost), then mouse/alt-screen teardown.
+    # Restore [Console] colors only (we never touch RawUI.*Color — see Enter-TUI 0.4.3.3).
     try {
         if ($null -ne $script:SavedConsoleBg) { [Console]::BackgroundColor = $script:SavedConsoleBg }
         if ($null -ne $script:SavedConsoleFg) { [Console]::ForegroundColor = $script:SavedConsoleFg }
-    } catch { }
-    try {
-        if ($null -ne $script:SavedRawUiBg) { $Host.UI.RawUI.BackgroundColor = $script:SavedRawUiBg }
-        if ($null -ne $script:SavedRawUiFg) { $Host.UI.RawUI.ForegroundColor = $script:SavedRawUiFg }
     } catch { }
     try { Disable-Mouse } catch { }
     try {
@@ -2316,10 +2309,6 @@ function script:Register-TuiCancelHandler {
             try {
                 if ($null -ne $script:SavedConsoleBg) { [Console]::BackgroundColor = $script:SavedConsoleBg }
                 if ($null -ne $script:SavedConsoleFg) { [Console]::ForegroundColor = $script:SavedConsoleFg }
-            } catch { }
-            try {
-                if ($null -ne $script:SavedRawUiBg) { $Host.UI.RawUI.BackgroundColor = $script:SavedRawUiBg }
-                if ($null -ne $script:SavedRawUiFg) { $Host.UI.RawUI.ForegroundColor = $script:SavedRawUiFg }
             } catch { }
             try {
                 $esc = [char]27
